@@ -1,0 +1,95 @@
+{
+  "model_name": "claude-sonnet-4-6",
+  "silent_footer": true,
+
+  "clients_source": "sheets",
+
+  "enforce_day_to_day_rehab_rotation": true,
+
+  "enforce_unique_conditioning_per_slot": true,
+  "enforce_unique_abs_per_slot": true,
+  "allow_abs_repeat_fallback_if_empty": true,
+
+  "enforce_unique_main_exercises_per_client": true,
+  "avoid_same_machine_overlap": true,
+
+  "global_ban_hanging_knee_raise": false,
+
+  "sheets": {
+    "spreadsheet_id": "19uB3x5uJgjTtJbVv2qo9ZZicxbjaTuO_qLUFI8-Sn64",
+    "service_account_path": "service_account.json",
+    "automation_tab_name": "RBSLOT_AUTOMATION",
+    "bookings_tab_name": "RBSLOT_BOOKINGS"
+  },
+
+  "name_aliases_exact": {
+    "anne": "Anne W",
+    "anne w": "Anne W",
+
+    "kirsty": "Kirsty M",
+    "kirsty m": "Kirsty M",
+
+    "owen": "Owen M",
+    "owen m": "Owen M",
+
+    "stuart": "Stuart G",
+    "stuart g": "Stuart G",
+    "staurt": "Stuart G",
+    "staurt g": "Stuart G",
+
+    "anj": "Anjali",
+    "anjali": "Anjali",
+
+    "karl": "Karl S",
+    "karl s": "Karl S",
+
+    "meera": "Meera",
+    "malcolm": "Malcolm",
+    "kay": "Kay",
+    "kevin": "Kevin"
+  },
+
+  "hanging_knee_raise_allowed_exact": [
+    "Karl S",
+    "Owen M",
+    "Aga",
+    "Russell",
+    "Sonya",
+    "Nargis",
+    "Anjali",
+    "Darren L",
+    "Gizem"
+  ],
+
+  "bike_banned_clients_exact": [
+    "Anne W",
+    "Kirsty M",
+    "Meera"
+  ],
+
+  "burpees_banned_clients_exact": [
+    "Anne W",
+    "Kirsty M",
+    "Meera"
+  ],
+
+  "no_conditioning_clients_exact": [
+    "Anjali"
+  ],
+
+  "no_plank_clients_exact": [
+    "Malcolm"
+  ],
+
+  "client_injury_overrides_exact": {
+    "Meera": "osteoporosis osteoarthritis neck knee no spinal flexion rotation"
+  },
+
+  "spice_clients_exact": [
+    "Owen M",
+    "Stuart G",
+    "Karl S"
+  ],
+
+  "spice_probability": 0.3
+}

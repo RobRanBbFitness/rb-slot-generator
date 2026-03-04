@@ -1,0 +1,9 @@
+﻿__pycache__/
+*.pyc
+.env
+service_account.json
+API Keys.txt
+generated_slots/
+workouts_log.json
+rehab_day_map.json
+*.xlsx

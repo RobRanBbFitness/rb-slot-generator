@@ -1,0 +1,2855 @@
+import os
+import re
+import json
+import random
+import argparse
+import time
+from datetime import datetime, timedelta
+
+import openpyxl
+import anthropic
+
+# Optional (Phase 4) - Google Sheets
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+except Exception:
+    gspread = None
+    Credentials = None
+
+
+# ============================================================
+# R&B FITNESS – SLOT GENERATOR (PHASE 2B/2C/2D + PHASE 3A + PHASE 4)
+# WhatsApp-safe output: NO blank lines, uses "—" separators.
+#
+# Modes:
+# 1) Interactive (default): prompts date/time/names
+# 2) Auto mode:
+#    - Stub source (default): reads bookings_stub.json
+#      python slot_generator_v2.py --auto --source stub --window-hours X
+#    - Sheets source (Phase 4): reads bookings from Google Sheets
+#      python slot_generator_v2.py --auto --source sheets --window-hours X
+#
+# PHASE 3A:
+# - Deterministic client logic, validation, fallback builder.
+#
+# PHASE 4:
+# - Load client overrides from Google Sheets tab: RBSLOT_AUTOMATION
+# - Load bookings from Google Sheets tab: RBSLOT_BOOKINGS
+# - OPTIONAL: Load client profiles (goal/injuries) from Google Sheets client tabs
+# ============================================================
+
+# ======= CONFIG =======
+EXCEL_FILENAME = "R_and_B_Fitness_Matercopy__1_.xlsx"
+MODEL_NAME = "claude-sonnet-4-6"
+WORKOUT_LOG_FILE = "workouts_log.json"
+REHAB_DAY_FILE = "rehab_day_map.json"
+EXERCISE_BANK_FILE = "exercise_bank.json"
+BOOKINGS_STUB_FILE = "bookings_stub.json"
+CONFIG_FILE = "rb_slot_config.json"
+
+AUTO_OUTPUT_DIR = "generated_slots"
+
+SILENT_FOOTER = True
+ENFORCE_DAY_TO_DAY_REHAB_ROTATION = True
+
+ENFORCE_UNIQUE_CONDITIONING_PER_SLOT = True
+ENFORCE_UNIQUE_ABS_PER_SLOT = True
+ALLOW_ABS_REPEAT_FALLBACK_IF_EMPTY = True
+
+ENFORCE_UNIQUE_CONDITIONING_FORMAT_PER_SLOT = True
+ALLOW_CONDITIONING_FORMAT_RELAX_FALLBACK = True
+
+# ======= Conditioning format weights (Controlled randomness) =======
+DEFAULT_CONDITIONING_FORMAT_WEIGHTS = {
+    "interval": 0.18,
+    "distance": 0.16,
+    "combo": 0.18,
+    "rounds": 0.12,
+    "ladder": 0.12,
+    "amrap": 0.10,
+    "emom": 0.10,
+    "challenge": 0.04,
+    "for_time": 0.00,
+    "mixed": 0.00,
+}
+LAST_FORMAT_PENALTY_MULTIPLIER = 0.25
+
+# ======= CLAUDE RETRY / BACKOFF =======
+CLAUDE_MAX_CALL_RETRIES = 10
+CLAUDE_INITIAL_BACKOFF_SEC = 2.0
+CLAUDE_MAX_BACKOFF_SEC = 45.0
+CLAUDE_BACKOFF_MULTIPLIER = 2.0
+CLAUDE_JITTER_RATIO = 0.35
+CLAUDE_MAX_TOKENS = 950
+
+# ======= CORE TIME RULES (NEW) =======
+CORE_TIME_FORMAT = "30sec to 1min"
+CORE_TIME_EXACT_NAMES = {
+    "plank",
+    "side plank",
+    "hollow hold",
+    "bear hold",
+    "dead bug hold",
+}
+
+CORE_TIME_KEYWORDS = [
+    " plank",
+    "side plank",
+    "hollow hold",
+    "bear hold",
+    "dead bug hold",
+    " isometric",
+    " hold",
+]
+
+
+# ============================================================
+# Helpers
+# ============================================================
+def norm(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").strip()).lower()
+
+def safe_str(v) -> str:
+    return "" if v is None else str(v).strip()
+
+def norm_medical(s: str) -> str:
+    t = (s or "").lower()
+    t = t.replace("’", "'")
+    t = re.sub(r"[/\\|,_;:()\[\]{}\-]+", " ", t)
+    t = re.sub(r"[^a-z0-9\s]+", " ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    t = t.replace("o a", "oa")
+    return t
+
+def load_json(path: str, default):
+    if not os.path.exists(path):
+        return default
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+def save_json(path: str, data):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+def _ensure_gspread_or_exit():
+    if gspread is None or Credentials is None:
+        print("ERROR: Google Sheets libraries missing.")
+        print("Run: pip install gspread google-auth")
+        raise SystemExit(1)
+
+def _load_runtime_config():
+    path = os.path.join(os.getcwd(), CONFIG_FILE)
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+_RUNTIME_CONFIG = _load_runtime_config()
+
+def _cfg_get(key, default):
+    return _RUNTIME_CONFIG.get(key, default)
+
+# ============================================================
+# PHASE 4: SHEETS CONFIG + LOADERS
+# ============================================================
+def load_sheets_config():
+    cfg = _RUNTIME_CONFIG.get("sheets", {}) if isinstance(_RUNTIME_CONFIG, dict) else {}
+    if not isinstance(cfg, dict):
+        cfg = {}
+
+    spreadsheet_id = safe_str(cfg.get("spreadsheet_id"))
+    service_account_path = safe_str(cfg.get("service_account_path")) or "service_account.json"
+    automation_tab_name = safe_str(cfg.get("automation_tab_name")) or "RBSLOT_AUTOMATION"
+    bookings_tab_name = safe_str(cfg.get("bookings_tab_name")) or "RBSLOT_BOOKINGS"
+
+    if not spreadsheet_id:
+        raise RuntimeError("Missing sheets.spreadsheet_id in rb_slot_config.json")
+
+    return {
+        "spreadsheet_id": spreadsheet_id,
+        "service_account_path": service_account_path,
+        "automation_tab_name": automation_tab_name,
+        "bookings_tab_name": bookings_tab_name,
+    }
+
+def get_gspread_client(service_account_path: str):
+    _ensure_gspread_or_exit()
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
+    ]
+    if not os.path.isabs(service_account_path):
+        service_account_path = os.path.join(os.getcwd(), service_account_path)
+    if not os.path.exists(service_account_path):
+        raise RuntimeError(f"service_account.json not found at: {service_account_path}")
+    creds = Credentials.from_service_account_file(service_account_path, scopes=scopes)
+    return gspread.authorize(creds)
+
+def _parse_bool_cell(v) -> bool:
+    s = safe_str(v).strip().lower()
+    return s in ("true", "1", "yes", "y", "on")
+
+def _parse_hard_bans(v) -> list:
+    s = safe_str(v)
+    if not s:
+        return []
+    parts = [p.strip() for p in s.split(",") if p.strip()]
+    return [norm(p) for p in parts if p.strip()]
+
+def load_client_overrides_from_sheets():
+    """
+    Reads tab: RBSLOT_AUTOMATION
+    Headers expected:
+    client_name, omit_conditioning, force_core_finisher, force_no_cardio, no_planks, no_floor,
+    supported_only, no_spinal_flexion, ban_bike, ban_burpees, extra_abs, force_abs_challenge, hard_bans
+    """
+    cfg = load_sheets_config()
+    gc = get_gspread_client(cfg["service_account_path"])
+    sh = gc.open_by_key(cfg["spreadsheet_id"])
+    ws = sh.worksheet(cfg["automation_tab_name"])
+
+    rows = ws.get_all_values()
+    if not rows or len(rows) < 2:
+        return {}
+
+    headers = [safe_str(h) for h in rows[0]]
+    idx = {h: i for i, h in enumerate(headers)}
+
+    def get(row, key):
+        i = idx.get(key, None)
+        if i is None:
+            return ""
+        return row[i] if i < len(row) else ""
+
+    out = {}
+    for r in rows[1:]:
+        if not any(safe_str(x) for x in r):
+            continue
+        name = safe_str(get(r, "client_name"))
+        if not name:
+            continue
+
+        out[norm(name)] = {
+            "client_name": name.strip(),
+            "omit_conditioning": _parse_bool_cell(get(r, "omit_conditioning")),
+            "force_core_finisher": _parse_bool_cell(get(r, "force_core_finisher")),
+            "force_no_cardio": _parse_bool_cell(get(r, "force_no_cardio")),
+            "no_planks": _parse_bool_cell(get(r, "no_planks")),
+            "no_floor": _parse_bool_cell(get(r, "no_floor")),
+            "supported_only": _parse_bool_cell(get(r, "supported_only")),
+            "no_spinal_flexion": _parse_bool_cell(get(r, "no_spinal_flexion")),
+            "ban_bike": _parse_bool_cell(get(r, "ban_bike")),
+            "ban_burpees": _parse_bool_cell(get(r, "ban_burpees")),
+            "extra_abs": _parse_bool_cell(get(r, "extra_abs")),
+            "force_abs_challenge": _parse_bool_cell(get(r, "force_abs_challenge")),
+            "hard_bans": _parse_hard_bans(get(r, "hard_bans")),
+        }
+
+    return out
+
+def _parse_sheet_datetime(value: str):
+    """
+    Accepts multiple date formats coming from Google Sheets.
+    Supports:
+    - ISO: 2026-03-05T06:00
+    - ISO with space: 2026-03-05 06:00
+    - UK: 05/03/2026 06:00 or 05/03/2026 06:00:00
+    - US-like (Sheets sometimes): 3/5/2026 6:00:00
+    """
+    s = (value or "").strip()
+    if not s:
+        return None
+
+    try:
+        return datetime.fromisoformat(s)
+    except Exception:
+        pass
+
+    fmts = [
+        "%d/%m/%Y %H:%M:%S",
+        "%d/%m/%Y %H:%M",
+        "%m/%d/%Y %H:%M:%S",
+        "%m/%d/%Y %H:%M",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+    ]
+    for fmt in fmts:
+        try:
+            return datetime.strptime(s, fmt)
+        except Exception:
+            continue
+
+    return None
+
+def load_bookings_from_sheets(window_hours: int):
+    cfg = load_sheets_config()
+    gc = get_gspread_client(cfg["service_account_path"])
+    sh = gc.open_by_key(cfg["spreadsheet_id"])
+    ws = sh.worksheet(cfg["bookings_tab_name"])
+
+    rows = ws.get_all_values()
+    if not rows or len(rows) < 2:
+        return []
+
+    headers = [h.strip() for h in rows[0]]
+    idx = {h: i for i, h in enumerate(headers)}
+
+    for req in ("start_iso", "clients", "focus"):
+        if req not in idx:
+            raise ValueError(f"Bookings tab missing header: {req}")
+
+    now = datetime.now()
+    end = now + timedelta(hours=int(window_hours))
+    sessions = []
+
+    for r in rows[1:]:
+        if not any((c or "").strip() for c in r):
+            continue
+
+        start_raw = (r[idx["start_iso"]] if idx["start_iso"] < len(r) else "").strip()
+        clients_raw = (r[idx["clients"]] if idx["clients"] < len(r) else "").strip()
+        focus = (r[idx["focus"]] if idx["focus"] < len(r) else "").strip()
+
+        if not start_raw or not clients_raw or not focus:
+            continue
+
+        dt = _parse_sheet_datetime(start_raw)
+        if dt is None:
+            continue
+
+        if not (now <= dt <= end):
+            continue
+
+        clients = [c.strip() for c in clients_raw.split("|") if c.strip()]
+        if not clients:
+            continue
+
+        sessions.append({"start": dt.isoformat(timespec="minutes"), "clients": clients, "focus": focus})
+
+    return sessions
+
+# ============================================================
+# CLIENTS SOURCE (Excel OR Sheets)  ✅ FIXED (service_account_path arg + spreadsheet id + correct dict shape)
+# ============================================================
+CLIENTS_SOURCE = safe_str(_cfg_get("clients_source", "excel")).lower().strip() or "excel"
+
+def _sheet_find_label_value(grid, label_keywords):
+    # grid: list[list[str]]
+    max_row = min(len(grid), 600)
+    max_col = min(max((len(r) for r in grid), default=0), 50)
+
+    for r in range(max_row):
+        row = grid[r]
+        for c in range(min(len(row), max_col)):
+            cell = safe_str(row[c])
+            t = norm(cell)
+            if not t:
+                continue
+            if any(k in t for k in label_keywords):
+                raw = cell
+                if ":" in raw:
+                    parts = raw.split(":", 1)
+                    if len(parts) == 2 and parts[1].strip():
+                        return parts[1].strip()
+                # right
+                if c + 1 < len(row):
+                    right = safe_str(row[c + 1])
+                    if right:
+                        return right
+                # below
+                if r + 1 < len(grid):
+                    below_row = grid[r + 1]
+                    if c < len(below_row):
+                        below = safe_str(below_row[c])
+                        if below:
+                            return below
+    return ""
+
+def load_clients_from_sheets():
+    """
+    Loads ALL client profile tabs from Google Sheets (every worksheet except automation/bookings tabs),
+    and returns a dict with the SAME SHAPE as load_clients_from_excel():
+      clients[norm(name)] = {"name": name, "injuries": "...", "goal": "..."}
+    """
+    cfg = load_sheets_config()
+    gc = get_gspread_client(cfg["service_account_path"])
+    sh = gc.open_by_key(cfg["spreadsheet_id"])
+
+    skip_titles = {cfg["automation_tab_name"], cfg["bookings_tab_name"]}
+
+    clients = {}
+    for ws in sh.worksheets():
+        title = (ws.title or "").strip()
+        if not title:
+            continue
+        if title in skip_titles:
+            continue
+
+        try:
+            grid = ws.get_all_values()
+        except Exception:
+            continue
+
+        injuries = _sheet_find_label_value(grid, [
+            "injur", "injury", "injuries", "notes", "limitations", "limitation", "pain",
+            "condition", "medical", "diagnos", "diagnosis", "history", "surgery", "operation", "op", "issue"
+        ])
+        goal = _sheet_find_label_value(grid, ["goal", "aim", "target"])
+
+        clients[norm(title)] = {
+            "name": title,
+            "injuries": injuries if injuries else "None listed",
+            "goal": goal if goal else "None listed",
+        }
+
+    return clients
+
+# ============================================================
+# Runtime config overrides (existing)
+# ============================================================
+MODEL_NAME = _cfg_get("model_name", MODEL_NAME)
+SILENT_FOOTER = bool(_cfg_get("silent_footer", SILENT_FOOTER))
+ENFORCE_DAY_TO_DAY_REHAB_ROTATION = bool(_cfg_get("enforce_day_to_day_rehab_rotation", ENFORCE_DAY_TO_DAY_REHAB_ROTATION))
+
+ENFORCE_UNIQUE_CONDITIONING_PER_SLOT = bool(_cfg_get("enforce_unique_conditioning_per_slot", ENFORCE_UNIQUE_CONDITIONING_PER_SLOT))
+ENFORCE_UNIQUE_ABS_PER_SLOT = bool(_cfg_get("enforce_unique_abs_per_slot", ENFORCE_UNIQUE_ABS_PER_SLOT))
+ALLOW_ABS_REPEAT_FALLBACK_IF_EMPTY = bool(_cfg_get("allow_abs_repeat_fallback_if_empty", ALLOW_ABS_REPEAT_FALLBACK_IF_EMPTY))
+
+# ✅ FIXED KEY (was wrong in your file)
+ENFORCE_UNIQUE_CONDITIONING_FORMAT_PER_SLOT = bool(
+    _cfg_get("enforce_unique_conditioning_format_per_slot", ENFORCE_UNIQUE_CONDITIONING_FORMAT_PER_SLOT)
+)
+ALLOW_CONDITIONING_FORMAT_RELAX_FALLBACK = bool(
+    _cfg_get("allow_conditioning_format_relax_fallback", ALLOW_CONDITIONING_FORMAT_RELAX_FALLBACK)
+)
+
+_cfg_weights = _cfg_get("conditioning_format_weights", None)
+CONDITIONING_FORMAT_WEIGHTS = dict(DEFAULT_CONDITIONING_FORMAT_WEIGHTS)
+if isinstance(_cfg_weights, dict):
+    for k, v in _cfg_weights.items():
+        try:
+            CONDITIONING_FORMAT_WEIGHTS[str(k).strip().lower()] = float(v)
+        except Exception:
+            pass
+
+# ============================================================
+# Name aliases
+# ============================================================
+NAME_ALIASES_EXACT = {
+    "owen": "Owen M",
+    "owen m": "Owen M",
+    "anne": "Anne W",
+    "anne w": "Anne W",
+    "kirsty": "Kirsty M",
+    "kirsty m": "Kirsty M",
+    "stuart": "Stuart G",
+    "stuart g": "Stuart G",
+    "staurt": "Stuart G",
+    "staurt g": "Stuart G",
+    "anj": "Anjali",
+    "anjali": "Anjali",
+}
+
+_cfg_aliases = _cfg_get("name_aliases_exact", {})
+if isinstance(_cfg_aliases, dict):
+    for k, v in _cfg_aliases.items():
+        if str(k).strip() and str(v).strip():
+            NAME_ALIASES_EXACT[norm(str(k))] = str(v).strip()
+
+def normalise_input_name(raw: str) -> str:
+    k = norm(raw)
+    if k in NAME_ALIASES_EXACT:
+        return NAME_ALIASES_EXACT[k]
+    return raw.strip()
+
+# ============================================================
+# UNILATERAL / 1-ARM RULES (STEP A TIGHTEN)
+# ============================================================
+UNILATERAL_KEYWORDS = [
+    "single arm",
+    "1 arm",
+    "one arm",
+    "single leg",
+    "1 leg",
+    "one leg",
+    "bulgarian split squat",
+    "split squat",
+    "step ups",
+    "step up",
+    "control step down",
+    "incline split squats",
+    "side clams",
+    "external rotation",
+    "pallof press",
+    "cable glute kickback",
+    "glute kickback",
+    "single leg rdl",
+    "single-leg rdl",
+    "single leg calf",
+    "single-leg calf",
+    "lunge",
+    "reverse lunge",
+    "walking lunge",
+]
+
+BILATERAL_FORCE_10TO12_KEYWORDS = [
+    "prone row",
+    "bench press",
+    "pec fly",
+    "seated pec fly",
+    "standing upper cable fly",
+    "standing middle cable fly",
+    "standing lower cable fly",
+    "dumbbell fly",
+    "incline dumbbell fly",
+    "cable high row",
+    "lat pull down wide grip",
+    "neutral grip lat pull down",
+    "seated cable row",
+    "cable low row",
+    "cable chest press",
+    "landmine incline press",
+    "deficit push ups",
+    "push ups",
+]
+
+def unilateral_rep_text() -> str:
+    return "10L/10R to 12L/12R"
+
+def is_unilateral_name(name_only: str) -> bool:
+    n = norm(name_only)
+    if any(k in n for k in BILATERAL_FORCE_10TO12_KEYWORDS):
+        return False
+    if any(k in n for k in UNILATERAL_KEYWORDS):
+        return True
+    if ("single" in n and "arm" in n) or ("single" in n and "leg" in n):
+        return True
+    if n.startswith("1 arm") or n.startswith("one arm"):
+        return True
+    if n.startswith("single arm") or n.startswith("single leg"):
+        return True
+    return False
+
+def _line_is_sets_line(s: str) -> bool:
+    t = norm(s)
+    return t.startswith("+x") or t == "+"
+
+def _line_is_header_or_sep(s: str) -> bool:
+    t = norm(s)
+    return (s == "—") or (t in ("conditioning", "core finisher", "rehab (all)"))
+
+def extract_name_from_output_line(line: str) -> str:
+    s = line.strip()
+    s = re.sub(r"\b10\s*to\s*12\b", "", s, flags=re.IGNORECASE).strip()
+    s = re.sub(r"\b10l/10r\s*to\s*12l/12r\b", "", s, flags=re.IGNORECASE).strip()
+    s = re.sub(r"\b10l/10r\b", "", s, flags=re.IGNORECASE).strip()
+    s = re.sub(r"\b60\s*to\s*100\s*reps\b", "", s, flags=re.IGNORECASE).strip()
+    s = re.sub(r"\b100\s*reps?\b", "", s, flags=re.IGNORECASE).strip()
+    s = re.sub(r"\bdrop\s*set\b", "", s, flags=re.IGNORECASE).strip()
+    s = re.sub(r"[–—\-]+$", "", s).strip()
+    return s.strip()
+
+# ======= CORE TIME ENFORCER (NEW) =======
+def _is_time_based_core_name(name_only: str) -> bool:
+    """
+    Force TIME for true holds only.
+    """
+    n = norm(name_only)
+
+    if n in CORE_TIME_EXACT_NAMES:
+        return True
+
+    if "hold" in n:
+        if "dumbbell" not in n and "kettlebell" not in n and "plate" not in n:
+            return True
+
+    if "side plank" in n and not any(x in n for x in ["rise", "rises", "hip dip", "reach", "rotation", "row"]):
+        return True
+    if "plank" in n and not any(x in n for x in ["tap", "taps", "reach", "walk", "walkout", "row", "up down", "up-down"]):
+        return True
+
+    for kw in CORE_TIME_KEYWORDS:
+        if kw.strip() and kw.strip() in n:
+            if any(x in n for x in ["rise", "rises", "tap", "taps"]):
+                return False
+            return True
+
+    return False
+
+def enforce_core_time_prescriptions(text: str) -> str:
+    if not text:
+        return text
+
+    lines_in = [l.rstrip() for l in text.splitlines()]
+    out = []
+    for raw in lines_in:
+        s = raw.strip()
+        if not s:
+            continue
+        if _line_is_header_or_sep(s) or _line_is_sets_line(s):
+            out.append(s)
+            continue
+
+        name_only = extract_name_from_output_line(s)
+        if _is_time_based_core_name(name_only):
+            base = extract_name_from_output_line(s)
+            out.append(f"{base} {CORE_TIME_FORMAT}".strip())
+        else:
+            out.append(s)
+
+    return "\n".join(out).strip()
+
+def enforce_rep_scheme_in_output(text: str) -> str:
+    if not text:
+        return text
+
+    lines_in = [l.rstrip() for l in text.splitlines()]
+    out = []
+
+    for raw in lines_in:
+        s = raw.strip()
+        if not s:
+            continue
+
+        if norm(s) == "stop":
+            continue
+
+        if _line_is_header_or_sep(s) or _line_is_sets_line(s):
+            out.append(s)
+            continue
+
+        if re.search(r"\bsec\b|\bmin\b", s, flags=re.IGNORECASE):
+            out.append(s)
+            continue
+
+        name_only = extract_name_from_output_line(s)
+        has_lr = bool(re.search(r"\b10l/10r\b", s, flags=re.IGNORECASE))
+
+        if is_unilateral_name(name_only):
+            fixed = re.sub(r"\b10\s*to\s*12\b", unilateral_rep_text(), s, flags=re.IGNORECASE)
+            fixed = re.sub(r"\b10l/10r\b(?!\s*to\s*12l/12r)", unilateral_rep_text(), fixed, flags=re.IGNORECASE)
+            fixed = re.sub(r"\b12l/12r\b", "12L/12R", fixed, flags=re.IGNORECASE)
+            if ("10l/10r" in fixed.lower()) and ("to 12l/12r" not in fixed.lower()):
+                fixed = re.sub(r"\b10l/10r\b", unilateral_rep_text(), fixed, flags=re.IGNORECASE)
+            out.append(fixed.strip())
+        else:
+            fixed = s
+            if has_lr:
+                fixed = re.sub(r"\b10l/10r\s*to\s*12l/12r\b", "10 to 12", fixed, flags=re.IGNORECASE)
+                fixed = re.sub(r"\b10l/10r\b", "10 to 12", fixed, flags=re.IGNORECASE)
+            out.append(fixed.strip())
+
+    return "\n".join(out).strip()
+
+def squash_trailing_separators(text: str) -> str:
+    if not text:
+        return text
+    lines = [l.rstrip() for l in text.splitlines()]
+    while lines and lines[-1].strip() == "":
+        lines.pop()
+    sep_count = 0
+    while lines and lines[-1].strip() == "—":
+        sep_count += 1
+        lines.pop()
+    if sep_count > 0:
+        lines.append("—")
+    return "\n".join(lines).strip()
+
+def ends_with_separator(block_text: str) -> bool:
+    if not block_text:
+        return False
+    lines = [l.strip() for l in block_text.splitlines() if l.strip() != ""]
+    return bool(lines) and lines[-1] == "—"
+
+def norm_block(s: str) -> str:
+    lines_out = []
+    for l in (s or "").splitlines():
+        l2 = re.sub(r"\s+", " ", l.strip()).lower()
+        l2 = re.sub(r"\bkb\s*swings\b", "kettlebell swings", l2)
+        if l2 != "":
+            lines_out.append(l2)
+    return "\n".join(lines_out)
+
+# ============================================================
+# Deterministic restrictions (base) + sheets override layer
+# ============================================================
+BIKE_BANNED_CLIENTS_EXACT = {"anne w", "kirsty m"}
+BURPEES_BANNED_CLIENTS_EXACT = {"anne w", "kirsty m"}
+
+HANGING_KNEE_RAISE_ALLOWED_EXACT = {
+    "karl s", "sonya", "owen m", "nargis", "aga", "russell", "anj", "darren l", "gizem"
+}
+GLOBAL_BAN_HANGING_KNEE_RAISE = False
+
+# ======= SPICE MODE =======
+SPICE_CLIENTS_EXACT = {"owen m", "stuart g", "karl s"}
+SPICE_PROBABILITY = 0.30
+
+_cfg_spice_clients = _cfg_get("spice_clients_exact", None)
+if isinstance(_cfg_spice_clients, list):
+    SPICE_CLIENTS_EXACT = {norm(x) for x in _cfg_spice_clients if str(x).strip()}
+try:
+    SPICE_PROBABILITY = float(_cfg_get("spice_probability", SPICE_PROBABILITY))
+except Exception:
+    pass
+
+# ======= EQUIPMENT REALITY =======
+GLOBAL_BANNED_EXERCISES = {
+    "Barbell Bent Over Row",
+    "Barbell Romanian Deadlift",
+    "Deadlift",
+    "Barbell Back Squat",
+    "Barbell Bench Press",
+    "Incline Barbell Bench Press",
+    "Close Grip Barbell Bench Press",
+    "Russian Twist",
+    "Medicine Ball Russian Twist",
+    "Barbell Hip Thrust",
+}
+
+_cfg_global_banned = _cfg_get("global_banned_exercises", None)
+if isinstance(_cfg_global_banned, list) and _cfg_global_banned:
+    GLOBAL_BANNED_EXERCISES = {str(x).strip() for x in _cfg_global_banned if str(x).strip()}
+
+NO_CONDITIONING_CLIENTS_EXACT = set()
+NO_PLANK_CLIENTS_EXACT = set()
+CLIENT_INJURY_OVERRIDES_EXACT = {}
+
+_cfg_no_cond = _cfg_get("no_conditioning_clients_exact", None)
+if isinstance(_cfg_no_cond, list):
+    NO_CONDITIONING_CLIENTS_EXACT = {norm(x) for x in _cfg_no_cond if str(x).strip()}
+_cfg_no_plank = _cfg_get("no_plank_clients_exact", None)
+if isinstance(_cfg_no_plank, list):
+    NO_PLANK_CLIENTS_EXACT = {norm(x) for x in _cfg_no_plank if str(x).strip()}
+_cfg_inj_overrides = _cfg_get("client_injury_overrides_exact", None)
+if isinstance(_cfg_inj_overrides, dict):
+    for k, v in _cfg_inj_overrides.items():
+        if str(k).strip() and str(v).strip():
+            CLIENT_INJURY_OVERRIDES_EXACT[norm(str(k))] = str(v).strip()
+
+_cfg_bike_banned = _cfg_get("bike_banned_clients_exact", None)
+if isinstance(_cfg_bike_banned, list):
+    BIKE_BANNED_CLIENTS_EXACT = {norm(x) for x in _cfg_bike_banned if str(x).strip()}
+_cfg_burpees_banned = _cfg_get("burpees_banned_clients_exact", None)
+if isinstance(_cfg_burpees_banned, list):
+    BURPEES_BANNED_CLIENTS_EXACT = {norm(x) for x in _cfg_burpees_banned if str(x).strip()}
+
+_cfg_hkr_allowed = _cfg_get("hanging_knee_raise_allowed_exact", None)
+if isinstance(_cfg_hkr_allowed, list):
+    HANGING_KNEE_RAISE_ALLOWED_EXACT = {norm(x) for x in _cfg_hkr_allowed if str(x).strip()}
+
+GLOBAL_BAN_HANGING_KNEE_RAISE = bool(_cfg_get("global_ban_hanging_knee_raise", GLOBAL_BAN_HANGING_KNEE_RAISE))
+if GLOBAL_BAN_HANGING_KNEE_RAISE:
+    HANGING_KNEE_RAISE_ALLOWED_EXACT = set()
+
+# ======= HARD-CODED EXACT SPECIAL RULES (defaults) =======
+SPECIAL_RULES_EXACT = {
+    "anj": {"force_no_cardio": True, "force_core_finisher": True},
+    "anjali": {"force_no_cardio": True, "force_core_finisher": True},
+    "malcolm": {"omit_conditioning": True, "no_planks": True},
+    "gizem": {"force_abs_challenge": True},
+}
+
+NO_CONDITIONING_MEDICAL_KEYWORDS = [
+    "atrial fibrillation", "fibrillation", "afib", "a fib", "a-fib",
+]
+
+# ============================================================
+# Rehab banks
+# ============================================================
+APPROVED_UPPER_REHAB_BANK = [
+    "1 Arm Rows",
+    "Y Raises",
+    "Scapular Protraction and Retraction",
+    "Banded External Rotation",
+]
+
+APPROVED_LOWER_REHAB_BANK = [
+    "Side Clams",
+    "Glute Bridge",
+    "VMO Raises",
+    "Backwards Walk on Treadmill",
+    "Control Step Down",
+    "Incline Split Squats",
+]
+
+UPPER_REHAB_TARGETS = {
+    "shoulder": ["Banded External Rotation", "Y Raises", "Scapular Protraction and Retraction", "1 Arm Rows"],
+    "rotator cuff": ["Banded External Rotation", "Y Raises", "Scapular Protraction and Retraction"],
+    "rotator": ["Banded External Rotation", "Y Raises"],
+    "cuff": ["Banded External Rotation", "Y Raises"],
+    "bicep": ["1 Arm Rows", "Y Raises"],
+    "biceps": ["1 Arm Rows", "Y Raises"],
+    "arm": ["1 Arm Rows", "Y Raises"],
+    "neck": ["Y Raises", "Scapular Protraction and Retraction"],
+    "upper back": ["Y Raises", "Scapular Protraction and Retraction"],
+    "trap": ["Y Raises", "Scapular Protraction and Retraction"],
+    "traps": ["Y Raises", "Scapular Protraction and Retraction"],
+}
+
+LOWER_REHAB_TARGETS = {
+    "knee": ["Backwards Walk on Treadmill", "Control Step Down", "Incline Split Squats", "VMO Raises"],
+    "meniscus": ["Backwards Walk on Treadmill", "Control Step Down", "VMO Raises"],
+    "acl": ["Backwards Walk on Treadmill", "Control Step Down", "VMO Raises"],
+    "ankle": ["Backwards Walk on Treadmill", "Control Step Down"],
+    "hip": ["Side Clams", "Glute Bridge"],
+    "glute": ["Side Clams", "Glute Bridge"],
+    "lower back": ["Glute Bridge", "Side Clams"],
+    "back pain": ["Glute Bridge", "Side Clams"],
+    "spine": ["Glute Bridge", "Side Clams"],
+    "spinal": ["Glute Bridge", "Side Clams"],
+    "arthritis": ["Glute Bridge", "Side Clams", "Control Step Down"],
+    "osteoarthritis": ["Glute Bridge", "Side Clams", "Control Step Down"],
+    "oa": ["Glute Bridge", "Side Clams", "Control Step Down"],
+    "osteoporosis": ["Glute Bridge", "Side Clams"],
+    "osteopenia": ["Glute Bridge", "Side Clams"],
+    "diabetes": ["Glute Bridge", "Side Clams"],
+    "copd": ["Glute Bridge", "Side Clams"],
+    "angina": ["Glute Bridge", "Side Clams"],
+}
+
+INJURY_EXERCISE_BANS = {
+    "rotator cuff": ["Bench Dips", "Landmine Push Press", "Dumbbell Shoulder Press", "Arnold Press", "Cable Shoulder Press"],
+    "rotator": ["Bench Dips", "Landmine Push Press", "Dumbbell Shoulder Press", "Arnold Press", "Cable Shoulder Press"],
+    "cuff": ["Bench Dips", "Landmine Push Press", "Dumbbell Shoulder Press", "Arnold Press", "Cable Shoulder Press"],
+    "shoulder": ["Bench Dips"],
+    "shoulder pain": ["Bench Dips"],
+
+    "lower back": ["Landmine Good Morning", "Good Morning"],
+    "back pain": ["Landmine Good Morning", "Good Morning"],
+    "spine": ["Landmine Good Morning", "Good Morning"],
+    "spinal": ["Landmine Good Morning", "Good Morning"],
+
+    "diastasis recti": ["Weighted Sit Ups", "Sit Ups"],
+    "diastasis": ["Weighted Sit Ups", "Sit Ups"],
+
+    "osteoporosis": ["Russian Twist", "Medicine Ball Russian Twist"],
+    "osteopenia": ["Russian Twist", "Medicine Ball Russian Twist"],
+    "arthritis": ["Russian Twist", "Medicine Ball Russian Twist"],
+    "osteoarthritis": ["Russian Twist", "Medicine Ball Russian Twist"],
+    "oa": ["Russian Twist", "Medicine Ball Russian Twist"],
+}
+
+INJURY_CONDITIONING_BANS = {
+    "osteoporosis": ["burpees", "box jump", "box jumps"],
+    "osteopenia": ["burpees", "box jump", "box jumps"],
+    "arthritis": ["burpees", "box jump", "box jumps"],
+    "osteoarthritis": ["burpees", "box jump", "box jumps"],
+    "oa": ["burpees", "box jump", "box jumps"],
+    "knee": ["burpees", "box jump", "box jumps"],
+    "meniscus": ["burpees", "box jump", "box jumps"],
+    "lower back": ["burpees", "box jump", "box jumps"],
+    "back pain": ["burpees", "box jump", "box jumps"],
+    "spine": ["burpees", "box jump", "box jumps"],
+    "spinal": ["burpees", "box jump", "box jumps"],
+    "atrial fibrillation": ["burpees"],
+    "fibrillation": ["burpees"],
+    "diastasis recti": ["burpees"],
+    "diastasis": ["burpees"],
+    "copd": ["burpees"],
+    "angina": ["burpees"],
+}
+
+# ============================================================
+# Exercise bank
+# ============================================================
+def load_exercise_bank():
+    data = load_json(EXERCISE_BANK_FILE, None)
+    if not data or "exercises" not in data:
+        raise RuntimeError(f"Missing or invalid {EXERCISE_BANK_FILE}.")
+    return data["exercises"]
+
+def focus_to_tags(focus: str) -> list:
+    parts = _split_focus_parts(focus)
+    if not parts:
+        return []
+    tags = []
+    for p in parts:
+        canon = FOCUS_NORMALISATION_MAP.get(p, p)
+        if canon in GROUP_EXPANSIONS:
+            tags.extend(GROUP_EXPANSIONS[canon])
+            continue
+        if canon in ("cardio", "conditioning"):
+            tags.extend(["conditioning", "cardio"])
+            continue
+        tags.append(canon)
+    out, seen = [], set()
+    for t in tags:
+        if t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+def filter_bank_for_client(focus: str, all_exercises: list):
+    tags = set(focus_to_tags(focus))
+    include_all_main = "__ALL_MAIN__" in tags
+    if include_all_main:
+        tags.discard("__ALL_MAIN__")
+    main, abs_bank, conditioning = [], [], []
+    for ex in all_exercises:
+        etype = safe_str(ex.get("type"))
+        etags = {norm(t) for t in ex.get("tags", []) if t}
+        if etype == "abs":
+            abs_bank.append(ex)
+            continue
+        if etype == "conditioning":
+            conditioning.append(ex)
+            continue
+        if etype == "main":
+            if include_all_main:
+                main.append(ex)
+            else:
+                if tags.intersection(etags):
+                    main.append(ex)
+    if not main and (("abs" in tags or "core" in tags) and ("cardio" in tags or "conditioning" in tags)):
+        main = abs_bank[:]
+    return main, abs_bank, conditioning
+
+def remove_unapproved_hanging_variations(abs_bank: list, client_name_norm: str):
+    if client_name_norm in HANGING_KNEE_RAISE_ALLOWED_EXACT:
+        return abs_bank
+    banned = {"hanging knee raise", "front lever knee raise", "front lever tucks"}
+    out = []
+    for ex in abs_bank:
+        nm = norm(safe_str(ex.get("name")))
+        if nm in banned:
+            continue
+        out.append(ex)
+    return out
+
+def apply_global_bans(main_bank: list, abs_bank: list):
+    banned_norm = {norm(x) for x in GLOBAL_BANNED_EXERCISES if str(x).strip()}
+    if not banned_norm:
+        return main_bank, abs_bank
+
+    def _keep(ex):
+        nm = norm(safe_str(ex.get("name")))
+        return nm and (nm not in banned_norm)
+
+    return [ex for ex in main_bank if _keep(ex)], [ex for ex in abs_bank if _keep(ex)]
+
+def _merged_injuries_text(client_name: str, injuries_text: str) -> str:
+    n = norm(client_name)
+    override = CLIENT_INJURY_OVERRIDES_EXACT.get(n, "")
+    if override and injuries_text and injuries_text != "None listed":
+        return f"{injuries_text} | OVERRIDE: {override}"
+    if override:
+        return override
+    return injuries_text or ""
+
+def apply_injury_bans(main_bank: list, abs_bank: list, injuries_text: str, client_name: str):
+    inj = norm_medical(_merged_injuries_text(client_name, injuries_text))
+    banned_names = set()
+
+    for kw, names in INJURY_EXERCISE_BANS.items():
+        if norm_medical(kw) in inj:
+            for nm in names:
+                banned_names.add(norm(nm))
+
+    if not banned_names:
+        return main_bank, abs_bank
+
+    def _keep(ex):
+        nm = norm(safe_str(ex.get("name")))
+        return nm and (nm not in banned_names)
+
+    return [ex for ex in main_bank if _keep(ex)], [ex for ex in abs_bank if _keep(ex)]
+
+def apply_hard_bans(main_bank: list, abs_bank: list, hard_bans_norm: list):
+    if not hard_bans_norm:
+        return main_bank, abs_bank
+
+    def _keep(ex):
+        nm = norm(safe_str(ex.get("name")))
+        if not nm:
+            return False
+        for b in hard_bans_norm:
+            if b and b in nm:
+                return False
+        return True
+
+    return [ex for ex in main_bank if _keep(ex)], [ex for ex in abs_bank if _keep(ex)]
+
+def build_approved_bank_text(main, abs_bank):
+    names = []
+    for ex in main + abs_bank:
+        n = safe_str(ex.get("name"))
+        if n:
+            names.append(n)
+    seen, out = set(), []
+    for n in names:
+        k = norm(n)
+        if k not in seen:
+            seen.add(k)
+            out.append(n)
+    return "\n".join(out)
+
+def seeded_rng(*parts: str) -> random.Random:
+    seed = norm("|".join([p for p in parts if p]))
+    return random.Random(seed)
+
+# ============================================================
+# Conditioning format + templates
+# ============================================================
+def _conditioning_format_tag(block: str) -> str:
+    b = norm_block(block)
+    if "emom" in b:
+        return "emom"
+    if "amrap" in b:
+        return "amrap"
+    if "ladder" in b:
+        return "ladder"
+    if "for time" in b:
+        return "for_time"
+    if "challenge" in b:
+        return "challenge"
+    if "\n+x" in ("\n" + b):
+        return "combo"
+    if "x3 rounds" in b or "x4 rounds" in b or "rounds" in b:
+        return "rounds"
+    if "sec" in b and "/" in b and "for 1min" in b:
+        return "interval"
+    if "20sec on / 10sec" in b or "20sec on/10sec" in b or "10sec slow" in b or "20sec slow" in b:
+        return "interval"
+    if "rowing machine" in b or b.startswith("row "):
+        if "m" in b or "cal" in b:
+            return "distance"
+    if "ski erg" in b or b.startswith("ski "):
+        if "m" in b or "cal" in b:
+            return "distance"
+    if "air bike" in b:
+        return "interval"
+    return "mixed"
+
+def _creative_conditioning_templates():
+    return [
+        "Rowing Machine 10sec Slow / 20sec Fast for 1min X1 to 4",
+        "Rowing Machine 20sec Slow / 10sec Fast for 1min X1 to 4",
+        "Ski Erg 10sec Hard / 20sec Moderate for 1min X1 to 4",
+        "Ski Erg 20sec Hard / 10sec Moderate for 1min X1 to 4",
+        "Battle Ropes 20sec On / 10sec Off X4",
+        "Battle Ropes 20sec On / 10sec Off X5",
+        "Slam Ball 20sec on / 10sec rest X4",
+        "Slam Ball 20sec on / 10sec rest X5",
+        "Wall Ball 20sec on / 10sec rest X4",
+        "Wall Ball 20sec on / 10sec rest X5",
+        "Air Bike 10sec Slow / 10sec Fast for 1min X1 to 3",
+        "Air Bike 10sec Slow / 20sec Fast for 1min X1 to 3",
+        "Treadmill 20sec Normal / 10sec Sprint for 1min X1 to 3",
+        "Treadmill 1min resistance push X1 to 3",
+        "Rowing Machine 250M X1 to 3",
+        "Rowing Machine 400M X1 to 3",
+        "Rowing Machine 500M X1 to 3",
+        "Rowing Machine 1000M X1",
+        "Ski Erg 250M X1 to 3",
+        "Ski Erg 400M X1 to 3",
+        "Ski Erg 500M X1 to 3",
+        "Ski Erg 1000M X1",
+        "Rowing Machine 10cal X1 to 3",
+        "Rowing Machine 12cal X1 to 3",
+        "Ski Erg 10cal X1 to 3",
+        "Row 250M for Time X2",
+        "Ski 250M for Time X2",
+        "Rowing Machine 8cal\n+X1 to 3\nSlam Ball 12",
+        "Ski Erg 10cal\n+X1 to 3\nWall Ball 12",
+        "Rowing Machine 12cal\n+X1 to 3\nKettlebell Swings 12",
+        "Rowing Machine 150M\n+X1 to 3\nBattle Ropes 20sec",
+        "Ski Erg 100M\n+X1 to 3\nBoxing Machine 50",
+        "Boxing Machine 50 to 100\n+X1 to 3\nSlam Ball 12 to 15",
+        "Wall Ball 12\n+X1 to 3\nKettlebell Swings 15",
+        "Battle Rope Alternating Waves 20sec\n+X1 to 3\nSlam Ball 15",
+        "10 Wall Balls\n10 Slam Balls\n10 Boxing Punches\nX3 Rounds",
+        "Row 100M\n10 Battle Rope Slams\nX3 Rounds",
+        "Ski 100M\n12 Wall Balls\nX3 Rounds",
+        "50 Punches\n10 Wall Balls\n10 Slam Balls\nX3",
+        "20sec Battle Ropes\n10 Kettlebell Swings\nX4",
+        "Ladder\nRowing Machine 100M\nWall Ball 6\nRowing Machine 150M\nWall Ball 8\nRowing Machine 200M\nWall Ball 10",
+        "Ladder\nSki Erg 100M\nSlam Ball 8\nSki Erg 150M\nSlam Ball 10\nSki Erg 200M\nSlam Ball 12",
+        "Ladder\nBoxing Machine 50\nWall Ball 8\nBoxing Machine 75\nWall Ball 10\nBoxing Machine 100\nWall Ball 12",
+        "AMRAP 6min\nRowing Machine 8cal\nWall Ball 10\nSlam Ball 10",
+        "AMRAP 6min\nSki Erg 10cal\nBattle Rope Slams 20sec\nBoxing Machine 50",
+        "AMRAP 5min\nTreadmill 1min incline walk\nKettlebell Swings 12",
+        "EMOM 8min\nMin 1: Rowing Machine 10cal\nMin 2: Wall Ball 12",
+        "EMOM 8min\nMin 1: Ski Erg 10cal\nMin 2: Slam Ball 12",
+        "EMOM 6min\nMin 1: Boxing Machine 100\nMin 2: Battle Rope Waves 20sec",
+        "100 Punch Challenge",
+        "Boxing Machine 300 Punches X1 to 5",
+        "Boxing Machine 200 Punches X1 to 5",
+        "Wall Ball 30 Total Reps As Fast As Possible",
+        "Slam Ball 50 Total Reps",
+        "Battle Rope 1min Max Effort",
+        "Jab and Reverse Push Machine 300 to 500 hits",
+        "Step Ups Fast Pace 30sec X3 to 5",
+        "Burpees 10/9/8/7/6/5/4/3/2/1",
+    ]
+
+def _dedupe_blocks(blocks: list):
+    seen = set()
+    out = []
+    for b in blocks:
+        k = norm_block(b)
+        if not k:
+            continue
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(b)
+    return out
+
+def build_conditioning_blocks(conditioning_exercises: list, rng: random.Random):
+    blocks = []
+    for ex in conditioning_exercises:
+        for t in ex.get("templates", []):
+            t = safe_str(t)
+            if t:
+                blocks.append(t)
+    blocks.extend(_creative_conditioning_templates())
+    blocks = _dedupe_blocks(blocks)
+    rng.shuffle(blocks)
+    return blocks
+
+def _weighted_choice_format(fmt_to_blocks: dict, weights: dict, rng: random.Random, avoid_fmt: str = "") -> str:
+    items = []
+    for fmt, blks in fmt_to_blocks.items():
+        if not blks:
+            continue
+        w = float(weights.get(fmt, 0.0))
+        if w <= 0:
+            continue
+        if avoid_fmt and fmt == avoid_fmt:
+            w *= LAST_FORMAT_PENALTY_MULTIPLIER
+        if w > 0:
+            items.append((fmt, w))
+
+    if not items:
+        fmts = [fmt for fmt, blks in fmt_to_blocks.items() if blks]
+        return rng.choice(fmts) if fmts else ""
+
+    total = sum(w for _, w in items)
+    r = rng.random() * total
+    acc = 0.0
+    for fmt, w in items:
+        acc += w
+        if r <= acc:
+            return fmt
+    return items[-1][0]
+
+def _select_conditioning_block_controlled(
+    blocks: list,
+    rng: random.Random,
+    used_blocks_norm: set,
+    used_formats: set,
+    last_client_block_norm: str,
+    last_client_format: str
+) -> str:
+    candidates = []
+    for b in blocks:
+        nb = norm_block(b)
+        if ENFORCE_UNIQUE_CONDITIONING_PER_SLOT and nb in used_blocks_norm:
+            continue
+        if last_client_block_norm and nb == last_client_block_norm:
+            continue
+        candidates.append(b)
+
+    if not candidates:
+        for b in blocks:
+            nb = norm_block(b)
+            if ENFORCE_UNIQUE_CONDITIONING_PER_SLOT and nb in used_blocks_norm:
+                continue
+            candidates.append(b)
+
+    if not candidates:
+        return ""
+
+    fmt_to_blocks = {}
+    for b in candidates:
+        fmt = _conditioning_format_tag(b)
+        fmt_to_blocks.setdefault(fmt, []).append(b)
+
+    if ENFORCE_UNIQUE_CONDITIONING_FORMAT_PER_SLOT and used_formats:
+        strict_fmt_to_blocks = {fmt: blks for fmt, blks in fmt_to_blocks.items() if fmt not in used_formats}
+    else:
+        strict_fmt_to_blocks = dict(fmt_to_blocks)
+
+    if strict_fmt_to_blocks:
+        chosen_fmt = _weighted_choice_format(strict_fmt_to_blocks, CONDITIONING_FORMAT_WEIGHTS, rng, avoid_fmt=last_client_format)
+        pool = strict_fmt_to_blocks.get(chosen_fmt, [])
+        if pool:
+            return rng.choice(pool)
+
+    if ALLOW_CONDITIONING_FORMAT_RELAX_FALLBACK:
+        chosen_fmt = _weighted_choice_format(fmt_to_blocks, CONDITIONING_FORMAT_WEIGHTS, rng, avoid_fmt=last_client_format)
+        pool = fmt_to_blocks.get(chosen_fmt, [])
+        if pool:
+            return rng.choice(pool)
+
+    return rng.choice(candidates)
+
+# ============================================================
+# Claude prompt
+# ============================================================
+SYSTEM_PROMPT_CLIENT_BLOCK = """
+R&B FITNESS – SLOT GENERATOR (PHASE 2B/2C/2C/2D + PHASE 3A + PHASE 4)
+
+You are generating ONE CLIENT BLOCK ONLY for an R&B Fitness PT slot.
+
+ABSOLUTE RULES:
+- Output ONLY the client block in the required WhatsApp format.
+- No commentary, no explanations, no questions, no emojis.
+- Do NOT rename, shorten, abbreviate, or misspell any exercise names.
+- Do NOT include the Rehab (All) block. Rehab is handled separately by the system.
+- No blank empty lines. Use "—" exactly as separators.
+- NEVER output the word STOP.
+
+TWO POSSIBLE FORMATS:
+
+A) STANDARD FORMAT (default)
+Header line: "{CLIENT_NAME}: {FOCUS_LABEL}"
+—
+3 supersets only (exactly 6 exercises total)
+Each superset is exactly 3 lines:
+Exercise Name 10 to 12  (ONLY unilateral single-side work may use 10L/10R to 12L/12R)
++X2 to 4  (or +X2 to 3)
+Exercise Name 10 to 12  (ONLY unilateral single-side work may use 10L/10R to 12L/12R)
+Each superset block separated by:
+—
+Then EITHER:
+Conditioning
+(one conditioning block copied EXACTLY)
+—
+OR (only if system says NO_CARDIO=ON):
+Core Finisher
+(one extra superset only: 2 exercises +X2 to 3)
+—
+
+B) SPICE FORMAT (only if system says SPICE_MODE=ON)
+Header line: "{CLIENT_NAME}: {FOCUS_LABEL}"
+—
+MAIN CHALLENGE (ONE LINE ONLY, no label):
+"{Exercise Name} 60 to 100 reps"
+—
+Then exactly 2 supersets (4 exercises total)
+Each superset is exactly 3 lines:
+Exercise Name 10 to 12 (ONLY unilateral single-side work may use 10L/10R to 12L/12R)
++X1 to 3
+Exercise Name 10 to 12 (ONLY unilateral single-side work may use 10L/10R to 12L/12R)
+Separate the 2 supersets with:
+—
+Then one DROP SET line:
+"{Exercise Name} Drop Set"
+—
+Then:
+Conditioning
+(one conditioning block copied EXACTLY)
+—
+
+UNIVERSAL RULES:
+- NEVER output "+X3" or "+X4" or "+X5" anywhere in client blocks.
+- SUPERSET BAN: Never pair ANY Fly variation with ANY Pushdown variation in the same superset.
+- FLY RULE: Do NOT include 2 Fly exercises in the main work.
+  Exception: you MAY include exactly TWO Fly exercises ONLY if they are:
+  "Standing Upper Cable Fly" AND "Standing Middle Cable Fly"
+- ABS RULE: Every client must include at least ONE abs/core exercise from the abs bank.
+- BANK RULE: use only Approved Bank names; Conditioning must be copied EXACTLY from allowed list.
+- If impossible, output exactly:
+ERROR: NEED MORE EXERCISES IN BANK
+""".strip()
+
+# ============================================================
+# Output parsing helpers
+# ============================================================
+def extract_exercise_lines(workout_text: str):
+    if not workout_text:
+        return []
+    if "ERROR: MODEL OUTPUT FAILED VALIDATION" in workout_text:
+        return []
+    lines = [l.strip() for l in workout_text.splitlines() if l.strip()]
+    exercises = []
+    for l in lines:
+        ln = norm(l)
+        if l == "—":
+            continue
+        if ln in ("conditioning", "core finisher"):
+            continue
+        if l.startswith("+X") or l.startswith("+x") or l.strip() == "+":
+            continue
+        exercises.append(l)
+    seen, out = set(), []
+    for e in exercises:
+        k = norm(e)
+        if k not in seen:
+            seen.add(k)
+            out.append(e)
+    return out[:120]
+
+def extract_conditioning_block(block_text: str) -> str:
+    if not block_text:
+        return ""
+    lines = [l.strip() for l in block_text.splitlines() if l.strip()]
+    for i, ln in enumerate(lines):
+        if norm(ln) == "conditioning":
+            cond_lines = [x for x in lines[i+1:] if x != "—"]
+            return "\n".join(cond_lines).strip()
+        if norm(ln) == "core finisher":
+            return ""
+    return ""
+
+def _maybe_insert_conditioning_header(output_text: str, allowed_conditioning_block_norm: str, flags: dict) -> str:
+    if not output_text:
+        return output_text
+    if flags.get("omit_conditioning"):
+        return output_text
+    no_cardio = bool(flags.get("force_core_finisher") or flags.get("force_no_cardio"))
+    if no_cardio:
+        return output_text
+
+    lines = [l.strip() for l in output_text.splitlines() if l.strip()]
+    if not lines:
+        return output_text
+
+    if any(norm(l) == "conditioning" for l in lines):
+        return output_text
+
+    sep_count = 0
+    start_idx = None
+    for i in range(2, len(lines)):
+        if lines[i] == "—":
+            sep_count += 1
+            if sep_count == 3:
+                start_idx = i + 1
+                break
+    if start_idx is None or start_idx >= len(lines):
+        return output_text
+
+    remaining = []
+    for j in range(start_idx, len(lines)):
+        if lines[j] == "—":
+            continue
+        remaining.append(lines[j])
+    remaining_norm = norm_block("\n".join(remaining).strip())
+
+    if remaining_norm and allowed_conditioning_block_norm and remaining_norm == allowed_conditioning_block_norm:
+        new_lines = lines[:start_idx] + ["Conditioning"] + lines[start_idx:]
+        return squash_trailing_separators("\n".join(new_lines).strip())
+
+    return output_text
+
+# ============================================================
+# Focus parsing / labels
+# ============================================================
+FOCUS_NORMALISATION_MAP = {
+    "chest": "chest",
+    "back": "back",
+    "shoulder": "shoulders",
+    "shoulders": "shoulders",
+    "tricep": "triceps",
+    "triceps": "triceps",
+    "bicep": "biceps",
+    "biceps": "biceps",
+    "forearm": "forearms",
+    "forearms": "forearms",
+    "quad": "quads",
+    "quads": "quads",
+    "quadricep": "quads",
+    "quadriceps": "quads",
+    "calf": "calves",
+    "calfs": "calves",
+    "calves": "calves",
+    "hamstring": "hamstrings",
+    "hamstrings": "hamstrings",
+    "glute": "glutes",
+    "glutes": "glutes",
+    "adductor": "adductors",
+    "adductors": "adductors",
+    "abductor": "abductors",
+    "abductors": "abductors",
+    "abs": "abs",
+    "ab": "abs",
+    "core": "core",
+    "cardio": "cardio",
+    "conditioning": "conditioning",
+    "flexibility": "flexibility",
+    "arms": "arms",
+    "legs": "legs",
+    "full body": "full_body",
+    "fullbody": "full_body",
+    "induction": "full_body",
+}
+
+GROUP_EXPANSIONS = {
+    "arms": ["biceps", "triceps", "forearms"],
+    "legs": ["quads", "hamstrings", "glutes", "calves"],
+    "full_body": ["__ALL_MAIN__"],
+}
+
+def _split_focus_parts(focus: str):
+    s = (focus or "").strip().lower()
+    s = s.replace("’", "'")
+    raw_parts = re.split(r"\s*(?:and|&|/|\+|,)\s*", s)
+    parts = []
+    for p in raw_parts:
+        p = re.sub(r"[^a-z0-9\s]", " ", p)
+        p = re.sub(r"\s+", " ", p).strip()
+        if not p:
+            continue
+        words = p.split()
+        if len(words) >= 2 and all((w in FOCUS_NORMALISATION_MAP) for w in words):
+            parts.extend(words)
+        else:
+            parts.append(p)
+    return parts
+
+def canonical_focus_label(focus_input: str) -> str:
+    parts = _split_focus_parts(focus_input)
+    if not parts:
+        return focus_input.strip()
+    label_parts = []
+    for p in parts:
+        canon = FOCUS_NORMALISATION_MAP.get(p, p)
+        if canon == "full_body":
+            return "Full Body"
+        if canon == "arms":
+            label_parts.append("Arms")
+            continue
+        if canon == "legs":
+            label_parts.append("Legs")
+            continue
+        if canon == "flexibility":
+            label_parts.append("Flexibility")
+            continue
+        label_parts.append(canon[:1].upper() + canon[1:])
+    return " & ".join(label_parts)
+
+# ============================================================
+# Excel parsing
+# ============================================================
+def find_label_value(ws, label_keywords):
+    max_row = min(ws.max_row, 600)
+    max_col = min(ws.max_column, 50)
+
+    for r in range(1, max_row + 1):
+        for c in range(1, max_col + 1):
+            cell = ws.cell(r, c).value
+            t = norm(safe_str(cell))
+            if not t:
+                continue
+            if any(k in t for k in label_keywords):
+                raw = safe_str(cell)
+                if ":" in raw:
+                    parts = raw.split(":", 1)
+                    if len(parts) == 2 and parts[1].strip():
+                        return parts[1].strip()
+                right = ws.cell(r, c + 1).value if c + 1 <= max_col else None
+                if safe_str(right):
+                    return safe_str(right)
+                below = ws.cell(r + 1, c).value if r + 1 <= max_row else None
+                if safe_str(below):
+                    return safe_str(below)
+    return ""
+
+def load_clients_from_excel(excel_path):
+    wb = openpyxl.load_workbook(excel_path, data_only=True)
+    clients = {}
+    for sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        name = sheet_name.strip()
+        if not name:
+            continue
+        injuries = find_label_value(ws, [
+            "injur", "injury", "injuries", "notes", "limitations", "limitation", "pain",
+            "condition", "medical", "diagnos", "diagnosis", "history", "surgery", "operation", "op", "issue"
+        ])
+        goal = find_label_value(ws, ["goal", "aim", "target"])
+        clients[norm(name)] = {
+            "name": name,
+            "injuries": injuries if injuries else "None listed",
+            "goal": goal if goal else "None listed",
+        }
+    return clients
+
+def match_client_strict(name_input, clients_dict):
+    fixed = normalise_input_name(name_input)
+    key = norm(fixed)
+    if key in clients_dict:
+        return clients_dict[key]
+    return None
+
+# ======= SHEETS OVERRIDES (loaded at runtime) =======
+SHEETS_OVERRIDES = {}
+
+def _sheet_rules_for(client_name: str) -> dict:
+    return SHEETS_OVERRIDES.get(norm(client_name), {})
+
+def get_special_flags(client_name: str, injuries_text: str):
+    n = norm(client_name)
+    first = n.split(" ")[0] if n else ""
+
+    flags = {
+        "force_no_cardio": False,
+        "force_core_finisher": False,
+        "force_abs_challenge": False,
+        "omit_conditioning": False,
+        "no_planks": False,
+        "no_floor": False,
+        "supported_only": False,
+        "no_spinal_flexion": False,
+        "ban_bike": False,
+        "ban_burpees": False,
+        "extra_abs": False,
+        "hard_bans": [],
+    }
+
+    for key, rule in SPECIAL_RULES_EXACT.items():
+        if n == key or first == key:
+            flags.update(rule)
+
+    if n in NO_CONDITIONING_CLIENTS_EXACT:
+        flags["omit_conditioning"] = True
+    if n in NO_PLANK_CLIENTS_EXACT:
+        flags["no_planks"] = True
+
+    inj = norm_medical(_merged_injuries_text(client_name, injuries_text))
+    if any(norm_medical(x) in inj for x in NO_CONDITIONING_MEDICAL_KEYWORDS):
+        flags["omit_conditioning"] = True
+        flags["no_planks"] = True
+
+    s = _sheet_rules_for(client_name)
+    if s:
+        for k in [
+            "omit_conditioning", "force_core_finisher", "force_no_cardio",
+            "no_planks", "no_floor", "supported_only", "no_spinal_flexion",
+            "ban_bike", "ban_burpees", "extra_abs", "force_abs_challenge"
+        ]:
+            if k in s:
+                flags[k] = bool(s.get(k))
+        hb = s.get("hard_bans", [])
+        if isinstance(hb, list):
+            flags["hard_bans"] = hb
+
+    return flags
+
+# ============================================================
+# Workout log
+# ============================================================
+def load_log():
+    return load_json(WORKOUT_LOG_FILE, {})
+
+def save_log(data):
+    save_json(WORKOUT_LOG_FILE, data)
+
+# ============================================================
+# Conditioning dedupe helpers
+# ============================================================
+def _looks_like_transient_error(exc: Exception) -> bool:
+    name = exc.__class__.__name__.lower()
+    msg = str(exc).lower()
+    if "overloaded" in name or "overloaded" in msg:
+        return True
+    transient_hints = ["ratelimit", "timeout", "timed out", "connection", "temporarily", "try again",
+                       "bad gateway", "service unavailable", "gateway timeout", " 502 ", " 503 ", " 504 "]
+    return any(h in name for h in transient_hints) or any(h in msg for h in transient_hints)
+
+# ============================================================
+# Anthropic
+# ============================================================
+def get_anthropic_client():
+    api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("ANTHROPIC_API_KEY missing (Environment Variable not set).")
+    return anthropic.Anthropic(api_key=api_key)
+
+def build_client_block_user_request(slot_date, slot_time, client, focus_label, approved_bank_text,
+                                   conditioning_block_single, last_workout_exercises, spice_mode: bool, flags: dict):
+    client_name = client["name"]
+    injuries = _merged_injuries_text(client_name, client["injuries"])
+    goal = client["goal"]
+
+    special_lines = []
+    special_lines.append("SPICE_MODE=ON (use SPICE FORMAT B exactly)." if spice_mode else "SPICE_MODE=OFF (use STANDARD FORMAT A exactly).")
+    no_cardio = bool(flags.get("force_no_cardio") or flags.get("force_core_finisher"))
+    special_lines.append("NO_CARDIO=ON (use Core Finisher instead of Conditioning)." if no_cardio else "NO_CARDIO=OFF (use Conditioning).")
+
+    special_lines.append("IMPORTANT REP RULE: Only TRUE unilateral (single arm/single leg) may use 10L/10R to 12L/12R. Bilateral lifts MUST stay 10 to 12.")
+    special_lines.append(f"IMPORTANT CORE RULE: Plank/Side Plank/Holds must be time-based: {CORE_TIME_FORMAT} (not 10 to 12).")
+
+    if norm(client_name) not in HANGING_KNEE_RAISE_ALLOWED_EXACT:
+        special_lines.append("IMPORTANT: Hanging Knee Raise / Front Lever Knee Raise / Front Lever Tucks are FORBIDDEN for this client. Do NOT use them.")
+
+    if flags.get("omit_conditioning"):
+        special_lines.append("IMPORTANT: Omit conditioning entirely (medical/coach rule). Do NOT output Conditioning or Core Finisher headers.")
+
+    if flags.get("no_planks"):
+        special_lines.append("IMPORTANT: No plank or side plank variations.")
+
+    if flags.get("no_spinal_flexion"):
+        special_lines.append("IMPORTANT: Avoid spinal flexion patterns (no sit ups / crunches / russian twists).")
+
+    if flags.get("supported_only"):
+        special_lines.append("IMPORTANT: Prefer supported / seated / machine-based options where possible.")
+
+    if flags.get("no_floor"):
+        special_lines.append("IMPORTANT: Avoid floor-based exercises where possible.")
+
+    if flags.get("hard_bans"):
+        special_lines.append("IMPORTANT HARD BANS (do not use anything matching these):")
+        for b in flags["hard_bans"]:
+            special_lines.append(f"- {b}")
+
+    if GLOBAL_BANNED_EXERCISES:
+        special_lines.append("IMPORTANT GLOBAL BANS: Do NOT use any of these exercises:")
+        for bn in sorted(GLOBAL_BANNED_EXERCISES):
+            special_lines.append(f"- {bn}")
+
+    avoid_repeats = []
+    if last_workout_exercises:
+        avoid_repeats.append("Avoid repeating these exact exercise lines from last session:")
+        for e in last_workout_exercises[:14]:
+            avoid_repeats.append(f"- {e}")
+
+    allowed_block_text = conditioning_block_single.strip() if conditioning_block_single else "NONE"
+
+    return f"""
+CLIENT:
+Name: {client_name}
+Focus label (must match header exactly): {focus_label}
+Slot: {slot_date} {slot_time}
+Injuries/Notes: {injuries}
+Goal: {goal}
+
+Special rules:
+{chr(10).join(special_lines) if special_lines else "None"}
+
+Anti-repeat:
+{chr(10).join(avoid_repeats) if avoid_repeats else "None"}
+
+APPROVED BANK NAMES (ONLY use these exact names; do not abbreviate; do not invent):
+{approved_bank_text}
+
+ALLOWED CONDITIONING BLOCKS:
+You MUST choose THIS exact ONE block only (copy EXACTLY; do NOT edit):
+{allowed_block_text}
+
+EXECUTE NOW.
+""".strip()
+
+# ============================================================
+# Model output normalisation + parsing
+# ============================================================
+def normalise_model_output(text: str) -> str:
+    if not text:
+        return text
+    raw_lines = [l.rstrip() for l in (text or "").splitlines()]
+    lines = [l.strip() for l in raw_lines if l.strip() != ""]
+    merged = []
+    for line in lines:
+        if norm(line) == "drop set" and merged:
+            prev = merged[-1]
+            if prev.strip() != "—" and "drop set" not in norm(prev):
+                merged[-1] = prev + " Drop Set"
+                continue
+        merged.append(line)
+    joined = "\n".join(merged).strip()
+    joined = enforce_rep_scheme_in_output(joined)
+    joined = enforce_core_time_prescriptions(joined)
+    return squash_trailing_separators(joined)
+
+# ======= CORE DUPLICATE FIXER (NEW) =======
+def _parse_core_finisher_pair(block_lines: list):
+    for i, ln in enumerate(block_lines):
+        if norm(ln) == "core finisher":
+            if i + 3 < len(block_lines):
+                return i, i + 1, i + 2, i + 3
+    return None
+
+def _collect_main_exercise_names(block_lines: list):
+    names = []
+    i = 2
+    sup_count = 0
+    while i < len(block_lines) and sup_count < 3:
+        if block_lines[i] == "—":
+            i += 1
+            continue
+        if i + 2 >= len(block_lines):
+            break
+        ex_a = block_lines[i]
+        sets = block_lines[i + 1]
+        ex_b = block_lines[i + 2]
+        if _line_is_sets_line(sets) or norm(sets).startswith("+x"):
+            name_a = extract_name_from_output_line(ex_a)
+            name_b = extract_name_from_output_line(ex_b)
+            if name_a:
+                names.append(name_a)
+            if name_b:
+                names.append(name_b)
+            sup_count += 1
+            i += 3
+        else:
+            i += 1
+    return names
+
+def _abs_candidate_name_list(abs_bank_original: list):
+    out = []
+    for ex in abs_bank_original or []:
+        nm = safe_str(ex.get("name"))
+        if nm:
+            out.append(nm)
+    return out
+
+def _passes_core_bans(name_only: str, flags: dict) -> bool:
+    n = norm(name_only)
+    if flags.get("no_planks") and "plank" in n:
+        return False
+    if flags.get("no_spinal_flexion"):
+        if any(x in n for x in ["sit up", "situp", "crunch", "russian twist", "toe touch"]):
+            return False
+    for b in flags.get("hard_bans", []) or []:
+        if b and b in n:
+            return False
+    return True
+
+def fix_duplicate_core_in_block(block_text: str, abs_bank_original: list, allowed_bank_names: set, flags: dict) -> str:
+    if not block_text:
+        return block_text
+
+    lines = [l.strip() for l in block_text.splitlines() if l.strip()]
+    if len(lines) < 6:
+        return block_text
+
+    core_idx = _parse_core_finisher_pair(lines)
+    if not core_idx:
+        return block_text
+
+    _, ex1_i, sets_i, ex2_i = core_idx
+    if ex2_i >= len(lines):
+        return block_text
+
+    main_names = _collect_main_exercise_names(lines)
+    main_norm = {norm(x) for x in main_names}
+
+    fin_ex1 = extract_name_from_output_line(lines[ex1_i])
+    fin_ex2 = extract_name_from_output_line(lines[ex2_i])
+
+    fin_norm_1 = norm(fin_ex1)
+    fin_norm_2 = norm(fin_ex2)
+
+    duplicates = set()
+    if fin_norm_1 in main_norm:
+        duplicates.add(fin_norm_1)
+    if fin_norm_2 in main_norm:
+        duplicates.add(fin_norm_2)
+
+    if not duplicates:
+        return block_text
+
+    candidates = _abs_candidate_name_list(abs_bank_original)
+    rng = random.Random(norm(lines[0]) + "|corefix")
+    rng.shuffle(candidates)
+
+    def pick_replacement():
+        for cand in candidates:
+            cn = norm(cand)
+            if not cand:
+                continue
+            if cn in duplicates:
+                continue
+            if cn in main_norm:
+                continue
+            if cn in (fin_norm_1, fin_norm_2):
+                continue
+            if allowed_bank_names and cn not in allowed_bank_names:
+                continue
+            if not _passes_core_bans(cand, flags):
+                continue
+            return cand
+        return ""
+
+    replacement = pick_replacement()
+    if not replacement:
+        return block_text
+
+    if fin_norm_1 in duplicates:
+        base = replacement
+        if _is_time_based_core_name(base):
+            lines[ex1_i] = f"{base} {CORE_TIME_FORMAT}"
+        else:
+            rep = unilateral_rep_text() if is_unilateral_name(base) else "10 to 12"
+            lines[ex1_i] = f"{base} {rep}"
+    elif fin_norm_2 in duplicates:
+        base = replacement
+        if _is_time_based_core_name(base):
+            lines[ex2_i] = f"{base} {CORE_TIME_FORMAT}"
+        else:
+            rep = unilateral_rep_text() if is_unilateral_name(base) else "10 to 12"
+            lines[ex2_i] = f"{base} {rep}"
+
+    fixed = "\n".join(lines).strip()
+    fixed = enforce_core_time_prescriptions(fixed)
+    return squash_trailing_separators(fixed)
+
+# ============================================================
+# Validation (existing)  (kept as-is from your build)
+# ============================================================
+def line_has_valid_sets_line_standard(line: str) -> bool:
+    return norm(line) in ("+x2 to 4", "+x2 to 3")
+
+def line_has_valid_sets_line_core_finisher(line: str) -> bool:
+    return norm(line) == "+x2 to 3"
+
+def line_has_valid_sets_line_spice(line: str) -> bool:
+    return norm(line) == "+x1 to 3"
+
+def _is_fly_name(name_only: str) -> bool:
+    return "fly" in norm(name_only)
+
+def _is_pushdown(name_only: str) -> bool:
+    t2 = norm(name_only)
+    return ("pushdown" in t2) or ("push down" in t2)
+
+def _is_knee_raise(name_only: str) -> bool:
+    return "hanging knee raise" in norm(name_only)
+
+def _is_main_challenge_line(line: str) -> bool:
+    t = norm(line)
+    return ("60 to 100 reps" in t) or bool(re.search(r"\b100\s*reps?\b", t))
+
+# --- validate_client_block stays identical to your pasted build (no changes needed) ---
+def validate_client_block(output_text: str, expected_client: str, expected_focus_label: str, flags: dict,
+                          allowed_bank_names: set, allowed_conditioning_block_norm: str, allowed_abs_names: set,
+                          client_name_norm: str, spice_mode: bool):
+    t = (output_text or "").strip()
+    if t == "ERROR: NEED MORE EXERCISES IN BANK":
+        return True, ""
+
+    lines = [l.rstrip() for l in t.splitlines() if l.strip()]
+    if not lines:
+        return False, "Empty output."
+
+    if any(norm(l) == "stop" for l in lines):
+        return False, "Invalid token detected: STOP"
+
+    for l in lines:
+        if norm(l) in ("+x3", "+x4", "+x5"):
+            return False, "Invalid sets line detected: +X3/+X4/+X5 not allowed."
+
+    expected_header = f"{expected_client}: {expected_focus_label}"
+    if lines[0] != expected_header:
+        return False, f"Header must be exactly: {expected_header}"
+    if len(lines) < 2 or lines[1] != "—":
+        return False, "Missing first '—' after header."
+
+    is_omit_conditioning = bool(flags.get("omit_conditioning"))
+    no_planks = bool(flags.get("no_planks"))
+
+    banned_norm = {norm(x) for x in GLOBAL_BANNED_EXERCISES if str(x).strip()}
+    for l in lines:
+        nm = norm(extract_name_from_output_line(l))
+        if nm and nm in banned_norm:
+            return False, f"Global banned exercise used: '{extract_name_from_output_line(l)}'"
+
+    if any(_is_knee_raise(extract_name_from_output_line(l)) for l in lines):
+        if client_name_norm not in HANGING_KNEE_RAISE_ALLOWED_EXACT:
+            return False, "Hanging Knee Raise is not allowed for this client."
+
+    blob = norm("\n".join(lines))
+    if no_planks and "plank" in blob:
+        return False, "Plank variations are not allowed for this client."
+
+    if is_omit_conditioning:
+        if "conditioning" in blob or "core finisher" in blob:
+            return False, "This client must have NO Conditioning/Core Finisher section."
+        return True, ""
+
+    no_cardio = bool(flags.get("force_core_finisher") or flags.get("force_no_cardio"))
+    if no_cardio:
+        spice_mode = False
+
+    if not spice_mode:
+        i = 2
+        main_exercise_names = []
+        core_finisher_names = []
+
+        for sup in range(3):
+            if i + 2 >= len(lines):
+                return False, f"Superset {sup+1} incomplete."
+            ex_a = lines[i]
+            sets = lines[i+1]
+            ex_b = lines[i+2]
+
+            if not line_has_valid_sets_line_standard(sets):
+                return False, f"Superset {sup+1} sets line must be '+X2 to 4' or '+X2 to 3'."
+
+            if not (("10 to 12" in norm(ex_a)) or ("10l/10r" in norm(ex_a)) or ("sec" in norm(ex_a)) or ("min" in norm(ex_a))):
+                return False, f"Superset {sup+1} exercise A missing reps/time."
+            if not (("10 to 12" in norm(ex_b)) or ("10l/10r" in norm(ex_b)) or ("sec" in norm(ex_b)) or ("min" in norm(ex_b))):
+                return False, f"Superset {sup+1} exercise B missing reps/time."
+
+            name_a = extract_name_from_output_line(ex_a)
+            name_b = extract_name_from_output_line(ex_b)
+
+            if norm(name_a) not in allowed_bank_names:
+                return False, f"Exercise not in bank: '{name_a}'"
+            if norm(name_b) not in allowed_bank_names:
+                return False, f"Exercise not in bank: '{name_b}'"
+
+            main_exercise_names.extend([name_a, name_b])
+
+            i += 3
+            if i >= len(lines) or lines[i] != "—":
+                return False, "Missing '—' between superset sections."
+            i += 1
+
+        j = 2
+        for _ in range(3):
+            a = extract_name_from_output_line(lines[j])
+            b2 = extract_name_from_output_line(lines[j+2])
+            if (_is_fly_name(a) and _is_pushdown(b2)) or (_is_fly_name(b2) and _is_pushdown(a)):
+                return False, "Superset ban violated: Fly variation + Pushdown variation."
+            j += 4
+
+        fly_names = [n for n in main_exercise_names if _is_fly_name(n)]
+        if len(fly_names) >= 2:
+            fly_set = {norm(x) for x in fly_names}
+            allowed_double_fly = {norm("Standing Upper Cable Fly"), norm("Standing Middle Cable Fly")}
+            if not (len(fly_set) == 2 and fly_set == allowed_double_fly):
+                return False, "Fly rule failed: No double flys unless exactly Standing Upper Cable Fly + Standing Middle Cable Fly."
+
+        if i >= len(lines):
+            return False, "Missing Conditioning/Core Finisher section."
+
+        header = norm(lines[i])
+        i += 1
+
+        if header == "conditioning":
+            if i >= len(lines):
+                return False, "Missing conditioning block."
+            cond_lines = [l for l in lines[i:] if l.strip() != "—"]
+            cond_block_text = "\n".join(cond_lines).strip()
+            if norm_block(cond_block_text) != allowed_conditioning_block_norm:
+                return False, "Conditioning block must match the ONE allowed conditioning block EXACTLY."
+        elif header == "core finisher":
+            if i + 2 >= len(lines):
+                return False, "Core Finisher incomplete."
+            ex_a = lines[i]
+            sets = lines[i+1]
+            ex_b = lines[i+2]
+            if not line_has_valid_sets_line_core_finisher(sets):
+                return False, "Core Finisher sets line must be '+X2 to 3'."
+            name_a = extract_name_from_output_line(ex_a)
+            name_b = extract_name_from_output_line(ex_b)
+            if norm(name_a) not in allowed_bank_names:
+                return False, f"Core Finisher exercise not in bank: '{name_a}'"
+            if norm(name_b) not in allowed_bank_names:
+                return False, f"Core Finisher exercise not in bank: '{name_b}'"
+            core_finisher_names.extend([name_a, name_b])
+        else:
+            remaining = []
+            for j2 in range(i-1, len(lines)):
+                if lines[j2].strip() == "—":
+                    continue
+                remaining.append(lines[j2].strip())
+            if norm_block("\n".join(remaining).strip()) == allowed_conditioning_block_norm:
+                pass
+            else:
+                return False, "Conditioning header missing (or Core Finisher missing for NO_CARDIO client)."
+
+        combined_for_abs_check = main_exercise_names + core_finisher_names
+        has_abs = any(norm(n) in allowed_abs_names for n in combined_for_abs_check)
+        if not has_abs:
+            return False, "ABS rule failed: no abs/core exercise from abs bank detected."
+        return True, ""
+
+    i = 2
+    if i < len(lines) and norm(lines[i]).startswith("main challenge"):
+        i += 1
+    if i >= len(lines) or not _is_main_challenge_line(lines[i]):
+        return False, "SPICE format failed: missing MAIN CHALLENGE line."
+    challenge_name = extract_name_from_output_line(lines[i])
+    if norm(challenge_name) not in allowed_bank_names:
+        return False, f"SPICE format failed: challenge exercise not in bank: '{challenge_name}'"
+    i += 1
+    if i >= len(lines) or lines[i] != "—":
+        return False, "SPICE format failed: missing '—' after MAIN CHALLENGE."
+    i += 1
+
+    main_exercise_names = []
+    for sup in range(2):
+        if i + 2 >= len(lines):
+            return False, f"SPICE format failed: Superset {sup+1} incomplete."
+        ex_a = lines[i]
+        sets = lines[i+1]
+        ex_b = lines[i+2]
+        if not line_has_valid_sets_line_spice(sets):
+            return False, "SPICE format failed: sets line must be '+X1 to 3'."
+        name_a = extract_name_from_output_line(ex_a)
+        name_b = extract_name_from_output_line(ex_b)
+        if norm(name_a) not in allowed_bank_names:
+            return False, f"Exercise not in bank: '{name_a}'"
+        if norm(name_b) not in allowed_bank_names:
+            return False, f"Exercise not in bank: '{name_b}'"
+        main_exercise_names.extend([name_a, name_b])
+
+        if (_is_fly_name(name_a) and _is_pushdown(name_b)) or (_is_fly_name(name_b) and _is_pushdown(name_a)):
+            return False, "Superset ban violated: Fly variation + Pushdown variation."
+
+        i += 3
+        if i >= len(lines) or lines[i] != "—":
+            return False, "SPICE format failed: missing '—' after superset."
+        i += 1
+
+    if i >= len(lines) or "drop set" not in norm(lines[i]):
+        return False, "SPICE format failed: missing Drop Set line."
+    drop_name = extract_name_from_output_line(lines[i])
+    if norm(drop_name) not in allowed_bank_names:
+        return False, f"SPICE format failed: drop set exercise not in bank: '{drop_name}'"
+    i += 1
+    if i >= len(lines) or lines[i] != "—":
+        return False, "SPICE format failed: missing '—' after Drop Set line."
+    i += 1
+
+    if i >= len(lines) or norm(lines[i]) != "conditioning":
+        return False, "SPICE format failed: Conditioning header missing."
+    i += 1
+    if i >= len(lines):
+        return False, "SPICE format failed: Missing conditioning block."
+    cond_lines = [l for l in lines[i:] if l.strip() != "—"]
+    cond_block_text = "\n".join(cond_lines).strip()
+    if norm_block(cond_block_text) != allowed_conditioning_block_norm:
+        return False, "Conditioning block must match the ONE allowed conditioning block EXACTLY."
+
+    has_abs = any(norm(n) in allowed_abs_names for n in main_exercise_names)
+    if not has_abs:
+        return False, "ABS rule failed in SPICE."
+    return True, ""
+
+# ============================================================
+# Claude call + retries
+# ============================================================
+def call_claude(system_prompt: str, user_prompt: str, max_tokens: int = None):
+    if max_tokens is None:
+        max_tokens = CLAUDE_MAX_TOKENS
+
+    client = get_anthropic_client()
+
+    backoff = float(CLAUDE_INITIAL_BACKOFF_SEC)
+    last_exc = None
+
+    for attempt in range(1, CLAUDE_MAX_CALL_RETRIES + 1):
+        try:
+            msg = client.messages.create(
+                model=MODEL_NAME,
+                max_tokens=int(max_tokens),
+                system=system_prompt,
+                messages=[{"role": "user", "content": user_prompt}],
+            )
+            text = ""
+            for block in msg.content:
+                if getattr(block, "type", "") == "text":
+                    text += block.text
+            return text.strip()
+
+        except Exception as e:
+            last_exc = e
+            if (attempt >= CLAUDE_MAX_CALL_RETRIES) or (not _looks_like_transient_error(e)):
+                raise
+
+            jitter = backoff * CLAUDE_JITTER_RATIO
+            wait_s = backoff + random.uniform(-jitter, jitter)
+            wait_s = max(0.5, min(CLAUDE_MAX_BACKOFF_SEC, wait_s))
+            time.sleep(wait_s)
+
+            backoff = min(CLAUDE_MAX_BACKOFF_SEC, backoff * CLAUDE_BACKOFF_MULTIPLIER)
+
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("Claude call failed unexpectedly.")
+
+# ============================================================
+# FALLBACK BUILDER (kept)
+# ============================================================
+def _pick_abs_exercise(abs_bank: list, rng: random.Random) -> str:
+    if not abs_bank:
+        return ""
+    return safe_str(rng.choice(abs_bank).get("name"))
+
+def _pick_main_exercise(main_bank: list, rng: random.Random, avoid_norm: set, must_not_include: set) -> str:
+    pool = []
+    for ex in main_bank:
+        nm = safe_str(ex.get("name"))
+        if not nm:
+            continue
+        nn = norm(nm)
+        if nn in avoid_norm:
+            continue
+        if nn in must_not_include:
+            continue
+        pool.append(nm)
+    if not pool:
+        return ""
+    return rng.choice(pool)
+
+def _is_pushdown_name_raw(nm: str) -> bool:
+    t = norm(nm)
+    return ("pushdown" in t) or ("push down" in t)
+
+def _is_fly_name_raw(nm: str) -> bool:
+    return "fly" in norm(nm)
+
+def build_fallback_standard_block(client_name: str, focus_label: str, main_bank: list, abs_bank: list,
+                                  conditioning_block: str, flags: dict, rng: random.Random) -> str:
+    no_cardio = bool(flags.get("force_core_finisher") or flags.get("force_no_cardio"))
+    omit_cond = bool(flags.get("omit_conditioning"))
+
+    used = set()
+    lines = [f"{client_name}: {focus_label}", "—"]
+
+    abs_name = _pick_abs_exercise(abs_bank, rng)
+
+    pairs = []
+    for _ in range(5):
+        nm2 = _pick_main_exercise(main_bank, rng, avoid_norm=used, must_not_include=set())
+        if not nm2:
+            break
+        used.add(norm(nm2))
+        pairs.append(nm2)
+
+    if abs_name:
+        pairs.append(abs_name)
+
+    while len(pairs) < 6:
+        nm2 = _pick_main_exercise(main_bank, rng, avoid_norm=used, must_not_include=set())
+        if not nm2:
+            break
+        used.add(norm(nm2))
+        pairs.append(nm2)
+
+    if len(pairs) < 6:
+        return "\n".join([f"{client_name}: {focus_label}", "—", "ERROR: NEED MORE EXERCISES IN BANK", "—"])
+
+    idx = 0
+    for _ in range(3):
+        a = pairs[idx]
+        b = pairs[idx + 1]
+        idx += 2
+
+        if (_is_fly_name_raw(a) and _is_pushdown_name_raw(b)) or (_is_fly_name_raw(b) and _is_pushdown_name_raw(a)):
+            swapped = False
+            for k in range(idx, len(pairs)):
+                cand = pairs[k]
+                if (_is_fly_name_raw(a) and _is_pushdown_name_raw(cand)) or (_is_fly_name_raw(cand) and _is_pushdown_name_raw(a)):
+                    continue
+                pairs[k], b = b, cand
+                swapped = True
+                break
+            if not swapped:
+                return "\n".join([f"{client_name}: {focus_label}", "—", "ERROR: NEED MORE EXERCISES IN BANK", "—"])
+
+        rep_a = CORE_TIME_FORMAT if _is_time_based_core_name(a) else (unilateral_rep_text() if is_unilateral_name(a) else "10 to 12")
+        rep_b = CORE_TIME_FORMAT if _is_time_based_core_name(b) else (unilateral_rep_text() if is_unilateral_name(b) else "10 to 12")
+
+        lines.append(f"{a} {rep_a}")
+        lines.append("+X2 to 4")
+        lines.append(f"{b} {rep_b}")
+        lines.append("—")
+
+    if omit_cond:
+        out = "\n".join(lines).strip()
+        out = enforce_core_time_prescriptions(out)
+        return out
+
+    if no_cardio:
+        lines.append("Core Finisher")
+        a2 = abs_name or _pick_abs_exercise(abs_bank, rng)
+        b2 = _pick_abs_exercise(abs_bank, rng)
+
+        if not a2 or not b2:
+            a2 = a2 or _pick_main_exercise(main_bank, rng, avoid_norm=set(), must_not_include=set())
+            b2 = b2 or _pick_main_exercise(main_bank, rng, avoid_norm={norm(a2)}, must_not_include=set())
+
+        rep_a2 = CORE_TIME_FORMAT if _is_time_based_core_name(a2) else (unilateral_rep_text() if is_unilateral_name(a2) else "10 to 12")
+        rep_b2 = CORE_TIME_FORMAT if _is_time_based_core_name(b2) else (unilateral_rep_text() if is_unilateral_name(b2) else "10 to 12")
+
+        lines.append(f"{a2} {rep_a2}")
+        lines.append("+X2 to 3")
+        lines.append(f"{b2} {rep_b2}")
+        lines.append("—")
+        out = "\n".join(lines).strip()
+        out = enforce_core_time_prescriptions(out)
+        return out
+
+    lines.append("Conditioning")
+    if conditioning_block:
+        for ln in conditioning_block.splitlines():
+            if ln.strip():
+                lines.append(ln.strip())
+    lines.append("—")
+    out = "\n".join(lines).strip()
+    out = enforce_core_time_prescriptions(out)
+    return out
+
+def generate_client_block_with_retries(system_prompt: str, user_prompt: str, expected_client: str, expected_focus_label: str,
+                                      flags: dict, allowed_bank_names: set, allowed_conditioning_block_norm: str,
+                                      allowed_abs_names: set, client_name_norm: str, spice_mode: bool,
+                                      main_bank_for_fallback: list, abs_bank_for_fallback: list,
+                                      conditioning_block_for_fallback: str, rng_for_fallback: random.Random,
+                                      max_tries: int = 6):
+    last_reason = ""
+
+    for attempt in range(1, max_tries + 1):
+        out = call_claude(
+            system_prompt,
+            user_prompt if attempt == 1 else (
+                user_prompt
+                + "\nREGENERATE. Output ONLY the client block. "
+                  "Header must match exactly. Use ONLY Approved Bank names. "
+                  "STANDARD sets line MUST be EXACTLY '+X2 to 4' or '+X2 to 3'. "
+                  "Core Finisher sets line MUST be EXACTLY '+X2 to 3'. "
+                  "SPICE sets line MUST be EXACTLY '+X1 to 3'. "
+                  "NEVER output +X3/+X4/+X5 anywhere. "
+                  "NEVER output STOP. "
+                  "No Fly + Pushdown in the same superset. "
+                  "No double flys unless exactly Standing Upper Cable Fly + Standing Middle Cable Fly. "
+                  "If client is not approved, DO NOT use Hanging Knee Raise / Front Lever Knee Raise / Front Lever Tucks. "
+                  "If NO_CARDIO=ON, use Core Finisher (not Conditioning). "
+                  "If omit conditioning is required, do NOT output Conditioning or Core Finisher headers. "
+                  "Conditioning must match the ONE allowed conditioning block EXACTLY. "
+                  "Include at least 1 abs/core exercise from the abs bank. "
+                  "IMPORTANT REP RULE: Only true unilateral uses 10L/10R to 12L/12R. Bilateral MUST be 10 to 12. "
+                  f"IMPORTANT CORE RULE: Planks/Holds must be {CORE_TIME_FORMAT}."
+            ),
+            max_tokens=CLAUDE_MAX_TOKENS
+        )
+
+        out = normalise_model_output(out)
+        out = _maybe_insert_conditioning_header(out, allowed_conditioning_block_norm, flags)
+
+        out = fix_duplicate_core_in_block(out, abs_bank_for_fallback, allowed_bank_names, flags)
+        out = enforce_core_time_prescriptions(out)
+
+        ok, reason = validate_client_block(
+            out, expected_client, expected_focus_label, flags,
+            allowed_bank_names, allowed_conditioning_block_norm, allowed_abs_names,
+            client_name_norm=client_name_norm, spice_mode=spice_mode
+        )
+        if ok:
+            return out
+        last_reason = reason
+
+    fallback = build_fallback_standard_block(
+        client_name=expected_client,
+        focus_label=expected_focus_label,
+        main_bank=main_bank_for_fallback,
+        abs_bank=abs_bank_for_fallback,
+        conditioning_block=conditioning_block_for_fallback,
+        flags=flags,
+        rng=rng_for_fallback
+    )
+    fallback = normalise_model_output(fallback)
+    fallback = fix_duplicate_core_in_block(fallback, abs_bank_for_fallback, allowed_bank_names, flags)
+    fallback = enforce_core_time_prescriptions(fallback)
+    return fallback
+
+# ============================================================
+# Rehab day locking
+# ============================================================
+def _latest_saved_date_key(rehab_map: dict) -> str:
+    latest_dt = None
+    latest_key = ""
+    for k in rehab_map.keys():
+        try:
+            dt = datetime.strptime(k, "%d/%m/%y")
+        except Exception:
+            continue
+        if latest_dt is None or dt > latest_dt:
+            latest_dt = dt
+            latest_key = k
+    return latest_key
+
+def _score_targets(text: str, targets: dict):
+    t = norm_medical(text)
+    hits = []
+    for kw, options in targets.items():
+        if norm_medical(kw) in t:
+            hits.extend(options)
+    out, seen = [], set()
+    for o in hits:
+        k = norm(o)
+        if k not in seen:
+            seen.add(k)
+            out.append(o)
+    return out
+
+def canonical_from_bank(name: str, bank_list: list) -> str:
+    for b in bank_list:
+        if norm(b) == norm(name):
+            return b
+    return name.strip()
+
+def choose_rehab_pair_deterministic(slot_clients, rehab_map):
+    notes = " ".join([safe_str(c.get("injuries")) for c in slot_clients if c])
+    upper_candidates = _score_targets(notes, UPPER_REHAB_TARGETS)
+    lower_candidates = _score_targets(notes, LOWER_REHAB_TARGETS)
+    upper_pool = upper_candidates + [x for x in APPROVED_UPPER_REHAB_BANK if x not in upper_candidates]
+    lower_pool = lower_candidates + [x for x in APPROVED_LOWER_REHAB_BANK if x not in lower_candidates]
+    last_upper = None
+    last_lower = None
+    latest_key = _latest_saved_date_key(rehab_map)
+    if latest_key:
+        last_upper = rehab_map[latest_key].get("upper")
+        last_lower = rehab_map[latest_key].get("lower")
+    for u in upper_pool:
+        for l in lower_pool:
+            if ENFORCE_DAY_TO_DAY_REHAB_ROTATION and last_upper and last_lower:
+                if norm(u) == norm(last_upper) and norm(l) == norm(last_lower):
+                    continue
+            return canonical_from_bank(u, APPROVED_UPPER_REHAB_BANK), canonical_from_bank(l, APPROVED_LOWER_REHAB_BANK)
+    return APPROVED_UPPER_REHAB_BANK[0], APPROVED_LOWER_REHAB_BANK[0]
+
+def normalise_date_key(date_str: str) -> str:
+    d = datetime.strptime(date_str.strip(), "%d/%m/%y")
+    return d.strftime("%d/%m/%y")
+
+def load_or_auto_set_day_rehab(slot_date, slot_time, slot_clients):
+    rehab_map = load_json(REHAB_DAY_FILE, {})
+    key = normalise_date_key(slot_date)
+    if key in rehab_map and rehab_map[key].get("upper") and rehab_map[key].get("lower"):
+        u = canonical_from_bank(rehab_map[key]["upper"], APPROVED_UPPER_REHAB_BANK)
+        l = canonical_from_bank(rehab_map[key]["lower"], APPROVED_LOWER_REHAB_BANK)
+        rehab_map[key] = {"upper": u, "lower": l}
+        save_json(REHAB_DAY_FILE, rehab_map)
+        return u, l, False, key
+    upper, lower = choose_rehab_pair_deterministic(slot_clients, rehab_map)
+    rehab_map[key] = {"upper": upper, "lower": lower}
+    save_json(REHAB_DAY_FILE, rehab_map)
+    return upper, lower, True, key
+
+def should_use_spice_mode(slot_date_key: str, slot_time: str, client_name: str, focus_label: str) -> bool:
+    n = norm(client_name)
+    if n not in SPICE_CLIENTS_EXACT:
+        return False
+    r = seeded_rng("spice", slot_date_key, slot_time, client_name, focus_label)
+    return (r.random() < SPICE_PROBABILITY)
+
+# ============================================================
+# Slot output building
+# ============================================================
+def _slot_header_lines(date_key: str, time_str: str, client_names):
+    return [
+        date_key,
+        "—",
+        time_str,
+        "—",
+        ", ".join(client_names),
+        "—",
+    ]
+
+def _rehab_lines(rehab_lower: str, rehab_upper: str):
+    lower_hint = unilateral_rep_text() if is_unilateral_name(rehab_lower) else "10 to 12"
+    upper_hint = unilateral_rep_text() if is_unilateral_name(rehab_upper) else "10 to 12"
+    return [
+        "Rehab (All)",
+        "—",
+        f"{rehab_lower} {lower_hint}",
+        "+X2",
+        f"{rehab_upper} {upper_hint}",
+        "—",
+    ]
+
+def _parse_time_to_display(dt: datetime) -> str:
+    hour = dt.hour
+    minute = dt.minute
+    ampm = "am" if hour < 12 else "pm"
+    hour12 = hour % 12
+    if hour12 == 0:
+        hour12 = 12
+    if minute == 0:
+        return f"{hour12}{ampm}"
+    return f"{hour12}:{minute:02d}{ampm}"
+
+def _safe_filename_for_session(dt: datetime) -> str:
+    return dt.strftime("%Y-%m-%d_%H%M") + ".txt"
+
+def _filter_abs_bank_unique(abs_bank: list, used_abs_norm: set):
+    if not ENFORCE_UNIQUE_ABS_PER_SLOT:
+        return abs_bank
+    out = []
+    for ex in abs_bank:
+        nm = norm(safe_str(ex.get("name")))
+        if not nm:
+            continue
+        if nm in used_abs_norm:
+            continue
+        out.append(ex)
+    return out
+
+def generate_slot_output(slot_date_ddmmyy: str, slot_time_display: str, raw_client_inputs: list, slot_focus: str,
+                         all_exercises, clients_dict, log):
+    normalised_inputs = [normalise_input_name(x) for x in raw_client_inputs]
+    slot_clients = []
+    missing = []
+    for nm2 in normalised_inputs:
+        c = match_client_strict(nm2, clients_dict)
+        if not c:
+            missing.append(nm2)
+        else:
+            slot_clients.append(c)
+
+    if missing:
+        # extra helpful message depending on clients source
+        src = CLIENTS_SOURCE
+        lines = [
+            "ERROR: These names do NOT match any client profile tabs (after alias normalisation):",
+            "—",
+        ]
+        lines.extend([f"- {m}" for m in missing])
+        lines.extend([
+            "—",
+            f"Client profiles source currently = {src.upper()}",
+            "Fix:",
+        ])
+        if src == "excel":
+            lines.extend([
+                "1) Make sure the LOCAL Excel file has a tab with that exact name, OR",
+                "2) Change the booking name in Sheets to match the Excel tab name, OR",
+                "3) Switch to Sheets clients: add to rb_slot_config.json -> \"clients_source\": \"sheets\"",
+            ])
+        else:
+            lines.extend([
+                "1) Make sure Google Sheets has a tab with that exact name (client profile tab), OR",
+                "2) Change the booking name to match the tab name exactly.",
+            ])
+        lines.append("—")
+        return "\n".join(lines), log
+
+    slot_client_names = [c["name"] for c in slot_clients]
+
+    rehab_upper, rehab_lower, _created, slot_date_key = load_or_auto_set_day_rehab(
+        slot_date_ddmmyy, slot_time_display, slot_clients
+    )
+
+    used_conditioning_blocks_norm = set()
+    used_conditioning_formats = set()
+    used_abs_norm = set()
+
+    out_lines = []
+    out_lines.extend(_slot_header_lines(slot_date_key, slot_time_display, slot_client_names))
+    out_lines.extend(_rehab_lines(rehab_lower, rehab_upper))
+
+    used_leg_ext_curl_combo = False
+    used_ski_erg = False
+    rower_count = 0
+    used_cable_pull_through = False
+    slot_used_exercise_names = set()
+
+    for idx, client in enumerate(slot_clients):
+        real_name = client["name"]
+        real_name_norm = norm(real_name)
+
+        focus_input = slot_focus.strip() if (slot_focus or "").strip() else "full body"
+        focus_label = canonical_focus_label(focus_input)
+
+        main_bank, abs_bank_original, conditioning_bank = filter_bank_for_client(focus_input, all_exercises)
+        abs_bank_original = remove_unapproved_hanging_variations(abs_bank_original, real_name_norm)
+
+        flags = get_special_flags(real_name, client.get("injuries", ""))
+
+        main_bank, abs_bank_original = apply_global_bans(main_bank, abs_bank_original)
+        main_bank, abs_bank_original = apply_injury_bans(main_bank, abs_bank_original, client.get("injuries", ""), client_name=real_name)
+        main_bank, abs_bank_original = apply_hard_bans(main_bank, abs_bank_original, flags.get("hard_bans", []))
+
+        abs_bank = _filter_abs_bank_unique(abs_bank_original, used_abs_norm)
+        if not abs_bank and ALLOW_ABS_REPEAT_FALLBACK_IF_EMPTY:
+            abs_bank = abs_bank_original[:]
+
+        filtered_main = []
+        for ex in main_bank:
+            nm3 = safe_str(ex.get("name"))
+            if not nm3:
+                continue
+            if norm(nm3) in slot_used_exercise_names:
+                continue
+            if used_leg_ext_curl_combo and nm3 in ("Leg Curl Machine", "Leg Extension Machine", "Hamstring Curl Machine"):
+                continue
+            if used_cable_pull_through and nm3 == "Cable Pull Through":
+                continue
+            filtered_main.append(ex)
+        main_bank = filtered_main
+
+        approved_bank_text = build_approved_bank_text(main_bank, abs_bank)
+        allowed_bank_names = {norm(x) for x in (approved_bank_text.splitlines() if approved_bank_text else [])}
+        allowed_abs_names = {norm(safe_str(ex.get("name"))) for ex in abs_bank if safe_str(ex.get("name"))}
+
+        ban_bike = (real_name_norm in BIKE_BANNED_CLIENTS_EXACT) or bool(flags.get("ban_bike"))
+        ban_burpees = (real_name_norm in BURPEES_BANNED_CLIENTS_EXACT) or bool(flags.get("ban_burpees"))
+
+        inj_text = norm_medical(_merged_injuries_text(real_name, client.get("injuries", "")))
+        injury_banned_terms = set()
+        for kw, terms in INJURY_CONDITIONING_BANS.items():
+            if norm_medical(kw) in inj_text:
+                for t in terms:
+                    injury_banned_terms.add(norm_medical(t))
+
+        rng = seeded_rng("cond", slot_date_key, slot_time_display, real_name, focus_label)
+        conditioning_blocks_all = build_conditioning_blocks(conditioning_bank, rng)
+
+        def _passes_common_bans(blk: str) -> bool:
+            nb = norm_block(blk)
+            if ban_bike and "air bike" in nb:
+                return False
+            if ban_burpees and ("burpees" in nb or nb.startswith("burpees")):
+                return False
+            if injury_banned_terms and any(t in nb for t in injury_banned_terms):
+                return False
+            if used_ski_erg and ("ski erg" in nb or nb.startswith("ski ")):
+                return False
+            if rower_count >= 2 and ("rowing machine" in nb or nb.startswith("row ")):
+                return False
+            for b in flags.get("hard_bans", []):
+                if b and b in nb:
+                    return False
+            return True
+
+        conditioning_blocks_filtered = [b for b in conditioning_blocks_all if _passes_common_bans(b)]
+
+        if flags.get("omit_conditioning"):
+            chosen_conditioning_block = ""
+        else:
+            client_log = log.get(real_name_norm, {}) if isinstance(log, dict) else {}
+            last_client_cond_block = norm_block(safe_str(client_log.get("last_conditioning_block", "")))
+            last_client_cond_fmt = safe_str(client_log.get("last_conditioning_format", "")).strip().lower()
+
+            chosen_conditioning_block = _select_conditioning_block_controlled(
+                blocks=conditioning_blocks_filtered,
+                rng=rng,
+                used_blocks_norm=used_conditioning_blocks_norm,
+                used_formats=used_conditioning_formats,
+                last_client_block_norm=last_client_cond_block,
+                last_client_format=last_client_cond_fmt
+            )
+
+        if not approved_bank_text or len(allowed_bank_names) < 10:
+            out_lines.extend([
+                f"{real_name}: {focus_label}",
+                "—",
+                "ERROR: NEED MORE EXERCISES IN BANK",
+                "—",
+                f"Missing enough bank items for focus: {focus_input}",
+                "—",
+            ])
+            log[real_name_norm] = {
+                "updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "last_focus": focus_label,
+                "last_exercises": [],
+                "last_conditioning_block": "",
+                "last_conditioning_format": ""
+            }
+            save_log(log)
+            continue
+
+        last_exercises = log.get(real_name_norm, {}).get("last_exercises", [])
+        spice_mode = should_use_spice_mode(slot_date_key, slot_time_display, real_name, focus_label)
+
+        user_prompt = build_client_block_user_request(
+            slot_date_key,
+            slot_time_display,
+            client,
+            focus_label,
+            approved_bank_text,
+            conditioning_block_single=chosen_conditioning_block,
+            last_workout_exercises=last_exercises,
+            spice_mode=spice_mode,
+            flags=flags
+        )
+
+        allowed_conditioning_block_norm = norm_block(chosen_conditioning_block) if chosen_conditioning_block else "none"
+
+        try:
+            block = generate_client_block_with_retries(
+                SYSTEM_PROMPT_CLIENT_BLOCK,
+                user_prompt,
+                expected_client=real_name,
+                expected_focus_label=focus_label,
+                flags=flags,
+                allowed_bank_names=allowed_bank_names,
+                allowed_conditioning_block_norm=allowed_conditioning_block_norm,
+                allowed_abs_names=allowed_abs_names,
+                client_name_norm=real_name_norm,
+                spice_mode=spice_mode,
+                main_bank_for_fallback=main_bank,
+                abs_bank_for_fallback=abs_bank_original,
+                conditioning_block_for_fallback=chosen_conditioning_block,
+                rng_for_fallback=rng,
+                max_tries=6
+            )
+        except Exception:
+            block = build_fallback_standard_block(
+                client_name=real_name,
+                focus_label=focus_label,
+                main_bank=main_bank,
+                abs_bank=abs_bank_original,
+                conditioning_block=chosen_conditioning_block,
+                flags=flags,
+                rng=rng
+            )
+            block = normalise_model_output(block)
+            block = fix_duplicate_core_in_block(block, abs_bank_original, allowed_bank_names, flags)
+            block = enforce_core_time_prescriptions(block)
+
+        out_lines.extend([l for l in block.splitlines() if l.strip() != ""])
+
+        if idx != len(slot_clients) - 1:
+            if not ends_with_separator(block):
+                out_lines.append("—")
+
+        if ("ERROR:" not in block) and block.strip() != "ERROR: NEED MORE EXERCISES IN BANK":
+            for ex_line in extract_exercise_lines(block):
+                name_only = extract_name_from_output_line(ex_line)
+                if name_only:
+                    slot_used_exercise_names.add(norm(name_only))
+
+        cond_block_actual = extract_conditioning_block(block)
+        if cond_block_actual:
+            used_conditioning_blocks_norm.add(norm_block(cond_block_actual))
+            used_conditioning_formats.add(_conditioning_format_tag(cond_block_actual))
+
+        abs_names_lookup = {norm(safe_str(ex.get("name"))) for ex in abs_bank_original if safe_str(ex.get("name"))}
+        if ("ERROR:" not in block) and block.strip() != "ERROR: NEED MORE EXERCISES IN BANK":
+            for ex_line in extract_exercise_lines(block):
+                nm4 = norm(extract_name_from_output_line(ex_line))
+                if nm4 and nm4 in abs_names_lookup:
+                    used_abs_norm.add(nm4)
+
+        bb = norm_block(block)
+        b = norm(block)
+        if "leg curl machine" in b or "leg extension machine" in b or "hamstring curl machine" in b:
+            used_leg_ext_curl_combo = True
+        if "cable pull through" in b:
+            used_cable_pull_through = True
+        if ("ski erg" in bb) or ("\nski " in ("\n" + bb)):
+            used_ski_erg = True
+        if ("rowing machine" in bb) or ("\nrow " in ("\n" + bb)):
+            rower_count += 1
+
+        if "ERROR:" in block or block.strip() == "ERROR: NEED MORE EXERCISES IN BANK":
+            log[real_name_norm] = {
+                "updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "last_focus": focus_label,
+                "last_exercises": [],
+                "last_conditioning_block": "",
+                "last_conditioning_format": ""
+            }
+        else:
+            exercises = extract_exercise_lines(block)
+            cond_for_log = extract_conditioning_block(block)
+            log[real_name_norm] = {
+                "updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "last_focus": focus_label,
+                "last_exercises": exercises,
+                "last_conditioning_block": cond_for_log,
+                "last_conditioning_format": _conditioning_format_tag(cond_for_log) if cond_for_log else ""
+            }
+        save_log(log)
+
+    return "\n".join(out_lines).strip(), log
+
+# ============================================================
+# IO / entrypoints
+# ============================================================
+def _ensure_inputs_exist_or_print_and_exit(clients_source: str):
+    if not os.path.exists(os.path.join(os.getcwd(), EXERCISE_BANK_FILE)):
+        print(f"ERROR: Could not find {EXERCISE_BANK_FILE} in this folder.")
+        raise SystemExit(1)
+
+    if clients_source == "excel":
+        excel_path = os.path.join(os.getcwd(), EXCEL_FILENAME)
+        if not os.path.exists(excel_path):
+            print(f"ERROR: Could not find {EXCEL_FILENAME} in this folder.")
+            print("Fix: Either put the Excel file in the folder OR set clients_source to 'sheets'.")
+            raise SystemExit(1)
+
+def _load_clients_by_source(clients_source: str):
+    if clients_source == "sheets":
+        return load_clients_from_sheets()
+    return load_clients_from_excel(os.path.join(os.getcwd(), EXCEL_FILENAME))
+
+def run_interactive(clients_source: str):
+    _ensure_inputs_exist_or_print_and_exit(clients_source)
+
+    all_exercises = load_exercise_bank()
+    clients = _load_clients_by_source(clients_source)
+    log = load_log()
+
+    global SHEETS_OVERRIDES
+    try:
+        SHEETS_OVERRIDES = load_client_overrides_from_sheets()
+        if SHEETS_OVERRIDES:
+            print(f"Loaded {len(SHEETS_OVERRIDES)} client override rows from Sheets.")
+    except Exception:
+        SHEETS_OVERRIDES = {}
+
+    slot_date = input("Enter date (e.g. 19/02/26): ").strip()
+    slot_time = input("Enter time (e.g. 12:20pm): ").strip()
+    names_line = input("Enter client names (comma separated): ").strip()
+
+    raw_inputs = [n.strip() for n in names_line.split(",") if n.strip()]
+    if not raw_inputs:
+        print("ERROR: No client names provided.")
+        return
+
+    print("Optional: type one focus for everyone.")
+    slot_focus = input("Slot focus (optional): ").strip()
+
+    if not slot_focus:
+        print("ERROR: Slot focus required in this build.")
+        return
+
+    output_text, _ = generate_slot_output(
+        slot_date_ddmmyy=slot_date,
+        slot_time_display=slot_time,
+        raw_client_inputs=raw_inputs,
+        slot_focus=slot_focus,
+        all_exercises=all_exercises,
+        clients_dict=clients,
+        log=log
+    )
+    print(output_text)
+    if not SILENT_FOOTER:
+        print("Done. (Workouts saved to workouts_log.json)")
+
+def _write_session_output(dt: datetime, clients_list: list, focus: str, all_exercises, clients_dict, log):
+    os.makedirs(os.path.join(os.getcwd(), AUTO_OUTPUT_DIR), exist_ok=True)
+
+    slot_date_ddmmyy = dt.strftime("%d/%m/%y")
+    slot_time_display = _parse_time_to_display(dt)
+    fname = _safe_filename_for_session(dt)
+    out_path = os.path.join(os.getcwd(), AUTO_OUTPUT_DIR, fname)
+
+    output_text, log = generate_slot_output(
+        slot_date_ddmmyy=slot_date_ddmmyy,
+        slot_time_display=slot_time_display,
+        raw_client_inputs=[safe_str(x) for x in clients_list],
+        slot_focus=focus,
+        all_exercises=all_exercises,
+        clients_dict=clients_dict,
+        log=log
+    )
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(output_text.strip() + "\n")
+
+    print(f"Generated: {AUTO_OUTPUT_DIR}\\{fname}")
+    return log
+
+def run_auto_from_stub(window_hours: int, clients_source: str):
+    _ensure_inputs_exist_or_print_and_exit(clients_source)
+
+    stub_path = os.path.join(os.getcwd(), BOOKINGS_STUB_FILE)
+    if not os.path.exists(stub_path):
+        print(f"ERROR: Could not find {BOOKINGS_STUB_FILE} in this folder.")
+        raise SystemExit(1)
+
+    data = load_json(stub_path, {})
+    sessions = data.get("sessions", []) if isinstance(data, dict) else []
+    if not isinstance(sessions, list) or not sessions:
+        print("ERROR: bookings_stub.json has no sessions.")
+        raise SystemExit(1)
+
+    all_exercises = load_exercise_bank()
+    clients = _load_clients_by_source(clients_source)
+    log = load_log()
+
+    now = datetime.now()
+    window_end = now + timedelta(hours=int(window_hours))
+
+    due = []
+    for s in sessions:
+        try:
+            start_str = safe_str(s.get("start"))
+            dt = datetime.fromisoformat(start_str)
+        except Exception:
+            continue
+        if now <= dt <= window_end:
+            due.append((dt, s))
+
+    if not due:
+        print(f"No sessions found in the next {window_hours}h window.")
+        return
+
+    for dt, s in sorted(due, key=lambda x: x[0]):
+        clients_list = s.get("clients", [])
+        focus = safe_str(s.get("focus")) or "full body"
+        if not isinstance(clients_list, list) or not clients_list:
+            continue
+        log = _write_session_output(dt, clients_list, focus, all_exercises, clients, log)
+
+    save_log(log)
+    if not SILENT_FOOTER:
+        print("Done. (Workouts saved to workouts_log.json)")
+
+def run_auto_from_sheets(window_hours: int, clients_source: str):
+    _ensure_inputs_exist_or_print_and_exit(clients_source)
+
+    all_exercises = load_exercise_bank()
+    clients = _load_clients_by_source(clients_source)
+    log = load_log()
+
+    global SHEETS_OVERRIDES
+    SHEETS_OVERRIDES = load_client_overrides_from_sheets()
+    print(f"Loaded {len(SHEETS_OVERRIDES)} client override rows from Sheets.")
+
+    sessions = load_bookings_from_sheets(window_hours=window_hours)
+    if not sessions:
+        print(f"No sessions found in Sheets in the next {window_hours}h window.")
+        return
+
+    due = []
+    for s in sessions:
+        try:
+            dt = datetime.fromisoformat(s["start"])
+        except Exception:
+            continue
+        due.append((dt, s))
+
+    for dt, s in sorted(due, key=lambda x: x[0]):
+        clients_list = s.get("clients", [])
+        focus = safe_str(s.get("focus")) or "full body"
+        if not isinstance(clients_list, list) or not clients_list:
+            continue
+        log = _write_session_output(dt, clients_list, focus, all_exercises, clients, log)
+
+    save_log(log)
+    if not SILENT_FOOTER:
+        print("Done. (Workouts saved to workouts_log.json)")
+
+def main():
+    global CLIENTS_SOURCE
+    parser = argparse.ArgumentParser(description="R&B Fitness Slot Generator (Interactive + Auto)")
+    parser.add_argument("--auto", action="store_true", help="Auto-run sessions from the chosen source in next window.")
+    parser.add_argument("--source", type=str, default="stub", choices=["stub", "sheets"], help="Auto source: stub or sheets.")
+    parser.add_argument("--clients-source", type=str, default=CLIENTS_SOURCE, choices=["excel", "sheets"], help="Client profiles source: excel or sheets.")
+    parser.add_argument("--window-hours", type=int, default=24, help="Auto window size in hours (default 24).")
+    args = parser.parse_args()
+
+    # update global in case user passes flag
+    CLIENTS_SOURCE = (args.clients_source or "excel").strip().lower()
+
+    if args.auto:
+        if args.source == "sheets":
+            run_auto_from_sheets(window_hours=args.window_hours, clients_source=CLIENTS_SOURCE)
+        else:
+            run_auto_from_stub(window_hours=args.window_hours, clients_source=CLIENTS_SOURCE)
+        return
+
+    run_interactive(clients_source=CLIENTS_SOURCE)
+
+if __name__ == "__main__":
+    main()

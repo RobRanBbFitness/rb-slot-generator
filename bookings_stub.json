@@ -1,0 +1,24 @@
+{
+  "sessions": [
+    {
+      "start": "2026-03-04T06:00:00",
+      "clients": ["anne", "kirsty", "meera"],
+      "focus": "back and biceps"
+    },
+    {
+      "start": "2026-03-04T07:00:00",
+      "clients": ["karl", "owen", "stuart"],
+      "focus": "chest and triceps"
+    },
+    {
+      "start": "2026-03-04T12:20:00",
+      "clients": ["anj"],
+      "focus": "quads and calfs"
+    },
+    {
+      "start": "2026-03-04T17:30:00",
+      "clients": ["anne", "kirsty"],
+      "focus": "hamstrings and glutes"
+    }
+  ]
+}

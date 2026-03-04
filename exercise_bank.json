@@ -1,0 +1,352 @@
+{
+  "version": "2.1-elite-massive-no-racks",
+  "exercises": [
+    { "name": "Cable Chest Press", "tags": ["chest", "triceps"], "type": "main", "format": "reps" },
+    { "name": "Incline Cable Chest Press", "tags": ["chest", "triceps"], "type": "main", "format": "reps" },
+    { "name": "Dumbbell Bench Press", "tags": ["chest", "triceps"], "type": "main", "format": "reps" },
+    { "name": "Incline Dumbbell Press", "tags": ["chest", "triceps"], "type": "main", "format": "reps" },
+    { "name": "Close Grip Dumbbell Press", "tags": ["chest", "triceps"], "type": "main", "format": "reps" },
+    { "name": "Push Ups", "tags": ["chest", "triceps"], "type": "main", "format": "reps" },
+    { "name": "Incline Push Ups", "tags": ["chest", "triceps"], "type": "main", "format": "reps" },
+    { "name": "Deficit Push Ups", "tags": ["chest", "triceps"], "type": "main", "format": "reps" },
+    { "name": "Single Arm Cable Chest Press", "tags": ["chest", "triceps"], "type": "main", "format": "unilateral" },
+    { "name": "Landmine Press", "tags": ["chest", "shoulders", "triceps"], "type": "main", "format": "reps" },
+    { "name": "Single Arm Landmine Press", "tags": ["chest", "shoulders", "triceps"], "type": "main", "format": "unilateral" },
+    { "name": "Half Kneeling Landmine Press", "tags": ["chest", "shoulders", "triceps", "core"], "type": "main", "format": "unilateral" },
+    { "name": "Tall Kneeling Landmine Press", "tags": ["chest", "shoulders", "triceps", "core"], "type": "main", "format": "reps" },
+    { "name": "Landmine Incline Press", "tags": ["chest", "triceps"], "type": "main", "format": "reps" },
+    { "name": "Alternating Landmine Press", "tags": ["chest", "shoulders", "triceps", "core"], "type": "main", "format": "unilateral" },
+
+    { "name": "Standing Upper Cable Fly", "tags": ["chest"], "type": "main", "format": "reps" },
+    { "name": "Standing Middle Cable Fly", "tags": ["chest"], "type": "main", "format": "reps" },
+    { "name": "Standing Lower Cable Fly", "tags": ["chest"], "type": "main", "format": "reps" },
+    { "name": "Seated Pec Fly Cable", "tags": ["chest"], "type": "main", "format": "reps" },
+    { "name": "Seated Pec Fly Dumbbell", "tags": ["chest"], "type": "main", "format": "reps" },
+    { "name": "Incline Dumbbell Fly", "tags": ["chest"], "type": "main", "format": "reps" },
+
+    { "name": "Cable High Row", "tags": ["back", "biceps"], "type": "main", "format": "reps" },
+    { "name": "Cable Low Row", "tags": ["back", "biceps"], "type": "main", "format": "reps" },
+    { "name": "Seated Cable Row", "tags": ["back", "biceps"], "type": "main", "format": "reps" },
+    { "name": "Single Arm Seated Row", "tags": ["back", "biceps"], "type": "main", "format": "unilateral" },
+    { "name": "Single Arm Cable Row", "tags": ["back", "biceps"], "type": "main", "format": "unilateral" },
+    { "name": "Prone Row DB", "tags": ["back", "biceps"], "type": "main", "format": "reps" },
+    { "name": "Standing Straight Arm Lat Pull Down", "tags": ["back"], "type": "main", "format": "reps" },
+    { "name": "Lat Pull Down Wide Grip", "tags": ["back", "biceps"], "type": "main", "format": "reps" },
+    { "name": "Lat Pull Down Close Grip", "tags": ["back", "biceps"], "type": "main", "format": "reps" },
+    { "name": "Neutral Grip Lat Pull Down", "tags": ["back", "biceps"], "type": "main", "format": "reps" },
+    { "name": "Single Arm Lat Pull Down", "tags": ["back", "biceps"], "type": "main", "format": "unilateral" },
+    { "name": "Barbell Bent Over Row", "tags": ["back", "biceps"], "type": "main", "format": "reps" },
+    { "name": "Landmine Row", "tags": ["back", "biceps"], "type": "main", "format": "reps" },
+    { "name": "Single Arm Landmine Row", "tags": ["back", "biceps"], "type": "main", "format": "unilateral" },
+    { "name": "Meadows Row", "tags": ["back", "biceps"], "type": "main", "format": "unilateral" },
+    { "name": "Band Assisted Pull Ups", "tags": ["back", "biceps"], "type": "main", "format": "reps" },
+    { "name": "Pull Ups", "tags": ["back", "biceps"], "type": "main", "format": "reps" },
+    { "name": "Chin Ups", "tags": ["back", "biceps"], "type": "main", "format": "reps" },
+    { "name": "Face Pulls", "tags": ["back", "shoulders"], "type": "main", "format": "reps" },
+    { "name": "Rear Delt Cable Fly", "tags": ["shoulders", "back"], "type": "main", "format": "reps" },
+    { "name": "Rear Delt Dumbbell Fly", "tags": ["shoulders"], "type": "main", "format": "reps" },
+
+    { "name": "Dumbbell Shoulder Press", "tags": ["shoulders", "triceps"], "type": "main", "format": "reps" },
+    { "name": "Arnold Press", "tags": ["shoulders", "triceps"], "type": "main", "format": "reps" },
+    { "name": "Cable Shoulder Press", "tags": ["shoulders", "triceps"], "type": "main", "format": "reps" },
+    { "name": "Dumbbell Lateral Raise", "tags": ["shoulders"], "type": "main", "format": "reps" },
+    { "name": "Cable Lateral Raise", "tags": ["shoulders"], "type": "main", "format": "reps" },
+    { "name": "Single Arm Cable Lateral Raise", "tags": ["shoulders"], "type": "main", "format": "unilateral" },
+    { "name": "Front Raise Dumbbell", "tags": ["shoulders"], "type": "main", "format": "reps" },
+    { "name": "Front Raise Plate", "tags": ["shoulders"], "type": "main", "format": "reps" },
+    { "name": "Upright Row Cable", "tags": ["shoulders", "traps"], "type": "main", "format": "reps" },
+    { "name": "Upright Row Dumbbell", "tags": ["shoulders", "traps"], "type": "main", "format": "reps" },
+    { "name": "Landmine Push Press", "tags": ["shoulders", "triceps"], "type": "main", "format": "reps" },
+
+    { "name": "EZ Bar Bicep Curl", "tags": ["biceps"], "type": "main", "format": "reps" },
+    { "name": "Cable Bicep Curl", "tags": ["biceps"], "type": "main", "format": "reps" },
+    { "name": "Single Arm Cable Curl", "tags": ["biceps"], "type": "main", "format": "unilateral" },
+    { "name": "Hammer Curl Dumbbell", "tags": ["biceps", "forearms"], "type": "main", "format": "reps" },
+    { "name": "Alternating Dumbbell Curl", "tags": ["biceps"], "type": "main", "format": "unilateral" },
+    { "name": "Incline Dumbbell Curl", "tags": ["biceps"], "type": "main", "format": "reps" },
+    { "name": "Concentration Curl", "tags": ["biceps"], "type": "main", "format": "unilateral" },
+    { "name": "Reverse Grip Cable Curl", "tags": ["biceps", "forearms"], "type": "main", "format": "reps" },
+
+    { "name": "Cable Tricep Pushdown", "tags": ["triceps"], "type": "main", "format": "reps" },
+    { "name": "Rope Tricep Pushdown", "tags": ["triceps"], "type": "main", "format": "reps" },
+    { "name": "Single Arm Cable Pushdown", "tags": ["triceps"], "type": "main", "format": "unilateral" },
+    { "name": "Overhead Cable Tricep Extension", "tags": ["triceps"], "type": "main", "format": "reps" },
+    { "name": "Overhead Dumbbell Tricep Extension", "tags": ["triceps"], "type": "main", "format": "reps" },
+    { "name": "Dumbbell Skull Crusher", "tags": ["triceps"], "type": "main", "format": "reps" },
+    { "name": "Cable Kickback", "tags": ["triceps"], "type": "main", "format": "reps" },
+    { "name": "Dumbbell Kickback", "tags": ["triceps"], "type": "main", "format": "reps" },
+    { "name": "Bench Dips", "tags": ["triceps", "chest"], "type": "main", "format": "reps" },
+
+    { "name": "Leg Press Low Foot Placement", "tags": ["quads"], "type": "main", "format": "reps" },
+    { "name": "Leg Press Low Foot", "tags": ["quads"], "type": "main", "format": "reps" },
+    { "name": "Goblet Squats", "tags": ["quads"], "type": "main", "format": "reps" },
+    { "name": "Goblet Squat", "tags": ["quads"], "type": "main", "format": "reps" },
+    { "name": "Dumbbell Squats", "tags": ["quads"], "type": "main", "format": "reps" },
+    { "name": "Landmine Squat", "tags": ["quads", "glutes"], "type": "main", "format": "reps" },
+    { "name": "Landmine Goblet Squat", "tags": ["quads", "glutes"], "type": "main", "format": "reps" },
+    { "name": "Landmine Box Squat", "tags": ["quads", "glutes"], "type": "main", "format": "reps" },
+    { "name": "Landmine Sumo Squat", "tags": ["quads", "glutes", "adductors"], "type": "main", "format": "reps" },
+    { "name": "Split Squats", "tags": ["quads", "glutes"], "type": "main", "format": "unilateral" },
+    { "name": "Landmine Split Squat", "tags": ["quads", "glutes"], "type": "main", "format": "unilateral" },
+    { "name": "Incline Split Squats", "tags": ["quads", "glutes"], "type": "main", "format": "unilateral" },
+    { "name": "Control Step Down", "tags": ["quads", "knee_rehab"], "type": "main", "format": "unilateral" },
+    { "name": "Step Ups", "tags": ["quads", "glutes", "hamstrings"], "type": "main", "format": "unilateral" },
+    { "name": "Wall Sit", "tags": ["quads"], "type": "main", "format": "reps" },
+    { "name": "Leg Extension Machine", "tags": ["quads"], "type": "main", "format": "reps" },
+    { "name": "Bulgarian Split Squat DB", "tags": ["quads", "glutes"], "type": "main", "format": "unilateral" },
+    { "name": "Sissy Squat Assisted", "tags": ["quads"], "type": "main", "format": "reps" },
+    { "name": "Landmine Forward Lunge", "tags": ["quads", "glutes"], "type": "main", "format": "unilateral" },
+    { "name": "Landmine Reverse Lunge", "tags": ["quads", "glutes", "hamstrings"], "type": "main", "format": "unilateral" },
+    { "name": "Landmine Lateral Lunge", "tags": ["quads", "glutes", "adductors"], "type": "main", "format": "unilateral" },
+
+    { "name": "Leg Press High Wide Foot", "tags": ["hamstrings", "glutes"], "type": "main", "format": "reps" },
+    { "name": "Dumbbell Romanian Deadlift", "tags": ["hamstrings", "glutes"], "type": "main", "format": "reps" },
+    { "name": "Kettlebell Romanian Deadlift", "tags": ["hamstrings", "glutes"], "type": "main", "format": "reps" },
+    { "name": "Barbell Romanian Deadlift", "tags": ["hamstrings", "glutes"], "type": "main", "format": "reps" },
+    { "name": "Trap Bar Deadlift", "tags": ["hamstrings", "glutes", "back"], "type": "main", "format": "reps" },
+    { "name": "Landmine Deadlift", "tags": ["hamstrings", "glutes", "back"], "type": "main", "format": "reps" },
+    { "name": "Barbell Hip Thrust", "tags": ["glutes", "hamstrings"], "type": "main", "format": "reps" },
+    { "name": "Hip Thrust Dumbbell", "tags": ["glutes", "hamstrings"], "type": "main", "format": "reps" },
+    { "name": "Glute Bridge", "tags": ["glutes", "hamstrings"], "type": "main", "format": "reps" },
+    { "name": "Banded Glute Bridge", "tags": ["glutes", "hamstrings"], "type": "main", "format": "reps" },
+    { "name": "Single Leg RDL", "tags": ["hamstrings", "glutes"], "type": "main", "format": "unilateral" },
+    { "name": "Landmine Single Leg RDL", "tags": ["hamstrings", "glutes"], "type": "main", "format": "unilateral" },
+    { "name": "Landmine Romanian Deadlift", "tags": ["hamstrings", "glutes"], "type": "main", "format": "reps" },
+    { "name": "Landmine Good Morning", "tags": ["hamstrings", "glutes", "back"], "type": "main", "format": "reps" },
+    { "name": "Hamstring Curl Machine", "tags": ["hamstrings"], "type": "main", "format": "reps" },
+    { "name": "Leg Curl Machine", "tags": ["hamstrings"], "type": "main", "format": "reps" },
+    { "name": "Back Extension", "tags": ["glutes", "hamstrings", "back"], "type": "main", "format": "reps" },
+    { "name": "Frog Pumps", "tags": ["glutes"], "type": "main", "format": "reps" },
+    { "name": "Banded Kickbacks", "tags": ["glutes"], "type": "main", "format": "reps" },
+    { "name": "Cable Glute Kickback", "tags": ["glutes"], "type": "main", "format": "unilateral" },
+    { "name": "Cable Pull Through", "tags": ["glutes", "hamstrings"], "type": "main", "format": "reps" },
+    { "name": "Cable Abduction", "tags": ["glutes", "abductors"], "type": "main", "format": "reps" },
+    { "name": "Side Clams", "tags": ["glutes", "abductors"], "type": "main", "format": "unilateral" },
+
+    { "name": "Standing Dumbbell Calf Raise", "tags": ["calves"], "type": "main", "format": "reps" },
+    { "name": "Standing Calf Raise Dumbbell", "tags": ["calves"], "type": "main", "format": "reps" },
+    { "name": "Leg Press Calf Raise", "tags": ["calves"], "type": "main", "format": "reps" },
+    { "name": "Single Leg Calf Raise", "tags": ["calves"], "type": "main", "format": "unilateral" },
+    { "name": "Seated Calf Raise Dumbbell", "tags": ["calves"], "type": "main", "format": "reps" },
+
+    { "name": "Farmers Carry", "tags": ["core", "conditioning"], "type": "main", "format": "reps" },
+    { "name": "Bottoms Up Kettlebell Carry", "tags": ["core", "shoulders", "conditioning"], "type": "main", "format": "reps" },
+    { "name": "Overhead Plate Carry", "tags": ["core", "shoulders", "conditioning"], "type": "main", "format": "reps" },
+
+    { "name": "Cable Abs Crunch", "tags": ["abs", "core"], "type": "abs", "format": "reps" },
+    { "name": "Cable Reverse Abs Crunch", "tags": ["abs", "core"], "type": "abs", "format": "reps" },
+    { "name": "Leg Raise", "tags": ["abs", "core"], "type": "abs", "format": "reps" },
+    { "name": "Hanging Knee Raise", "tags": ["abs", "core"], "type": "abs", "format": "reps" },
+    { "name": "Front Lever Knee Raise", "tags": ["abs", "core"], "type": "abs", "format": "reps" },
+    { "name": "Front Lever Tucks", "tags": ["abs", "core"], "type": "abs", "format": "reps" },
+    { "name": "Bicycle Crunch", "tags": ["abs", "core"], "type": "abs", "format": "reps" },
+    { "name": "Russian Twist", "tags": ["abs", "core"], "type": "abs", "format": "reps" },
+    { "name": "Medicine Ball Russian Twist", "tags": ["abs", "core"], "type": "abs", "format": "reps" },
+    { "name": "Plank", "tags": ["core", "abs"], "type": "abs", "format": "reps" },
+    { "name": "Side Plank", "tags": ["core", "abs"], "type": "abs", "format": "unilateral" },
+    { "name": "Dead Bug", "tags": ["abs", "core"], "type": "abs", "format": "unilateral" },
+    { "name": "Heel Taps", "tags": ["abs", "core"], "type": "abs", "format": "reps" },
+    { "name": "Sit Ups", "tags": ["abs", "core"], "type": "abs", "format": "reps" },
+    { "name": "Weighted Sit Ups", "tags": ["abs", "core"], "type": "abs", "format": "reps" },
+    { "name": "Mountain Climbers", "tags": ["abs", "core", "conditioning"], "type": "abs", "format": "reps" },
+    { "name": "Hollow Body Hold", "tags": ["abs", "core"], "type": "abs", "format": "reps" },
+    { "name": "Toe Touch Crunch", "tags": ["abs", "core"], "type": "abs", "format": "reps" },
+    { "name": "Reverse Crunch", "tags": ["abs", "core"], "type": "abs", "format": "reps" },
+
+    { "name": "Cable Woodchop", "tags": ["core", "abs"], "type": "abs", "format": "unilateral" },
+    { "name": "Cable Rotation", "tags": ["core", "abs"], "type": "abs", "format": "unilateral" },
+    { "name": "Pallof Press", "tags": ["core"], "type": "abs", "format": "unilateral" },
+    { "name": "Tall Kneeling Pallof Press", "tags": ["core"], "type": "abs", "format": "unilateral" },
+    { "name": "Seated Anti Rotation Hold", "tags": ["core"], "type": "abs", "format": "reps" },
+
+    { "name": "Landmine Rotation", "tags": ["core", "abs"], "type": "abs", "format": "unilateral" },
+    { "name": "Landmine 180s", "tags": ["core", "abs"], "type": "abs", "format": "reps" },
+    { "name": "Landmine Twists", "tags": ["core", "abs"], "type": "abs", "format": "reps" },
+    { "name": "Landmine Woodchop", "tags": ["core", "abs"], "type": "abs", "format": "unilateral" },
+    { "name": "Landmine Anti Rotation Press", "tags": ["core", "abs"], "type": "abs", "format": "unilateral" },
+    { "name": "Landmine Rotational Lunge", "tags": ["core", "abs", "quads", "glutes"], "type": "abs", "format": "unilateral" },
+    { "name": "Landmine Rotational Press", "tags": ["core", "abs", "chest", "shoulders"], "type": "abs", "format": "unilateral" },
+
+    {
+      "name": "Rowing Machine",
+      "tags": ["conditioning", "cardio"],
+      "type": "conditioning",
+      "format": "templates",
+      "templates": [
+        "Rowing Machine 250M X1 to 3",
+        "Rowing Machine 400M X1 to 3",
+        "Rowing Machine 500M X1 to 3",
+        "Rowing Machine 1000M X1",
+        "Rowing Machine 10cal X1 to 3",
+        "Rowing Machine 12cal X1 to 3",
+        "Rowing Machine 10sec Normal / 10sec Sprint for 1min X1 to 3",
+        "Rowing Machine 20sec Normal / 10sec Sprint for 1min X1 to 3"
+      ]
+    },
+    {
+      "name": "Ski Erg",
+      "tags": ["conditioning", "cardio"],
+      "type": "conditioning",
+      "format": "templates",
+      "templates": [
+        "Ski Erg 250M X1 to 3",
+        "Ski Erg 400M X1 to 3",
+        "Ski Erg 500M X1 to 3",
+        "Ski Erg 1000M X1",
+        "Ski Erg 10cal X1 to 3",
+        "Ski Erg 10sec Normal / 10sec Sprint for 1min X1 to 3",
+        "Ski Erg 20sec Normal / 10sec Sprint for 1min X1 to 3"
+      ]
+    },
+    {
+      "name": "Air Bike",
+      "tags": ["conditioning", "cardio", "bike"],
+      "type": "conditioning",
+      "format": "templates",
+      "templates": [
+        "Air Bike 1min steady X1 to 3",
+        "Air Bike 10sec Normal / 10sec Sprint for 1min X1 to 3",
+        "Air Bike 20sec Normal / 10sec Sprint for 1min X1 to 3",
+        "Air Bike 10sec Slow / 10sec Fast for 1min X1 to 3",
+        "Air Bike 10sec Slow / 20sec Fast for 1min X1 to 3"
+      ]
+    },
+    {
+      "name": "Treadmill",
+      "tags": ["conditioning", "cardio"],
+      "type": "conditioning",
+      "format": "templates",
+      "templates": [
+        "Treadmill 1min incline walk X1 to 3",
+        "Treadmill 1min brisk walk X1 to 3",
+        "Treadmill 1min resistance push X1 to 3",
+        "Treadmill 10sec Normal / 10sec Sprint for 1min X1 to 3",
+        "Treadmill 20sec Normal / 10sec Sprint for 1min X1 to 3"
+      ]
+    },
+    {
+      "name": "Battle Ropes",
+      "tags": ["conditioning", "cardio"],
+      "type": "conditioning",
+      "format": "templates",
+      "templates": [
+        "Battle Ropes 20sec On / 10sec Off X4",
+        "Battle Ropes 20sec On / 10sec Off X5",
+        "Battle Rope Waves 20sec X4 to 5",
+        "Battle Rope Slams 20sec X4 to 5"
+      ]
+    },
+    {
+      "name": "Slam Balls",
+      "tags": ["conditioning"],
+      "type": "conditioning",
+      "format": "templates",
+      "templates": [
+        "Slam Balls 12 to 15 X3 to 5",
+        "Slam Ball 20sec on / 10sec rest X4",
+        "Slam Ball 20sec on / 10sec rest X5",
+        "Slam Ball 50 Total Reps"
+      ]
+    },
+    {
+      "name": "Wall Balls",
+      "tags": ["conditioning"],
+      "type": "conditioning",
+      "format": "templates",
+      "templates": [
+        "Wall Balls 12 to 15 X3 to 5",
+        "Wall Ball 20sec on / 10sec rest X4",
+        "Wall Ball 20sec on / 10sec rest X5",
+        "Wall Ball 30 Total Reps As Fast As Possible"
+      ]
+    },
+    {
+      "name": "Boxing Machine",
+      "tags": ["conditioning", "cardio", "boxing"],
+      "type": "conditioning",
+      "format": "templates",
+      "templates": [
+        "Boxing Machine 50 Punches X2 to 5",
+        "Boxing Machine 100 Punches X1 to 5",
+        "Boxing Machine 200 Punches X1 to 5",
+        "Boxing Machine 300 Punches X1 to 5",
+        "100 Punch Challenge"
+      ]
+    },
+    {
+      "name": "Burpees",
+      "tags": ["conditioning", "cardio"],
+      "type": "conditioning",
+      "format": "templates",
+      "templates": [
+        "Burpees 10/9/8/7/6/5/4/3/2/1"
+      ]
+    },
+    {
+      "name": "Kettlebell Swings",
+      "tags": ["conditioning", "glutes", "hamstrings"],
+      "type": "conditioning",
+      "format": "templates",
+      "templates": [
+        "Kettlebell Swings 12 to 15 X3 to 5"
+      ]
+    },
+    {
+      "name": "Step Ups Fast Pace",
+      "tags": ["conditioning", "cardio"],
+      "type": "conditioning",
+      "format": "templates",
+      "templates": [
+        "Step Ups Fast Pace 30sec X3 to 5"
+      ]
+    },
+    {
+      "name": "Jab and Reverse Push Machine",
+      "tags": ["conditioning", "boxing"],
+      "type": "conditioning",
+      "format": "templates",
+      "templates": [
+        "Jab and Reverse Push Machine 300 to 500 hits"
+      ]
+    },
+    {
+      "name": "Elite Conditioning Library",
+      "tags": ["conditioning", "cardio"],
+      "type": "conditioning",
+      "format": "templates",
+      "templates": [
+        "Rowing Machine 10sec Normal / 10sec Sprint for 1min X1 to 4",
+        "Ski Erg 10sec Hard / 20sec Moderate for 1min X1 to 4",
+        "Rowing Machine 8cal\n+X1 to 4\nSlam Ball 12",
+        "Ski Erg 10cal\n+X1 to 4\nWall Ball 12",
+        "Rowing Machine 150M\n+X2 to 4\nBattle Ropes 20sec",
+        "Ski Erg 100M\n+X2 to 4\nBoxing Machine 50",
+        "Rowing Machine 12cal\n+X1 to 4\nKettlebell Swings 12",
+        "Ski Erg 10cal\n+X1 to 4\nBattle Rope Waves 20sec",
+        "Boxing Machine 50 to 100\n+X1 to 4\nSlam Ball 12 to 15",
+        "Wall Ball 15\n+X1 to 4\nBattle Rope Slams 20sec",
+        "Rowing Machine 10cal\n+\nWall Ball 12\n+X1 to 4\nSlam Ball 10",
+        "Ski Erg 8cal\n+\nBoxing Machine 40\n+X1 to 4\nWall Ball 10",
+        "Battle Rope Alternating Waves 20sec\n+X1 to 4\nSlam Ball 15",
+        "Wall Ball 12\n+X1 to 4\nKettlebell Swings 15",
+        "Slam Ball 15\n+X3 to 5",
+        "Battle Rope Slams 20sec\n+X3 to 5",
+        "Wall Ball 15\n+X3 to 5",
+        "Boxing Machine 100 X1 to 4",
+        "Rowing Machine 200M X2 to 4",
+        "Ski Erg 150M X2 to 4",
+        "10 Wall Balls\n10 Slam Balls\n10 Boxing Punches\nX3 Rounds",
+        "Row 100M\n10 Battle Rope Slams\nX3 Rounds",
+        "Ski 100M\n12 Wall Balls\nX3 Rounds",
+        "50 Punches\n10 Wall Balls\n10 Slam Balls\nX3",
+        "20sec Battle Ropes\n10 Kettlebell Swings\nX4",
+        "Row 250M for Time X2",
+        "Ski 250M for Time X2",
+        "Wall Ball 30 Total Reps As Fast As Possible",
+        "100 Punch Challenge",
+        "Battle Rope 1min Max Effort",
+        "Slam Ball 50 Total Reps"
+      ]
+    }
+  ]
+}

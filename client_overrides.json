@@ -1,0 +1,40 @@
+{
+  "Malcolm": {
+    "injuries_override": "Atrial fibrillation (AFib). No cardio conditioning. No plank or side plank variations.",
+    "omit_conditioning": true,
+    "no_planks": true,
+    "no_floor": true,
+    "supported_only": true,
+    "hard_bans": ["plank", "side plank", "burpees", "jump", "russian twist"],
+    "ban_burpees": true,
+    "ban_bike": true
+  },
+  "Kay": {
+    "injuries_override": "Lower back arthritis L4/L5/S1, arthritis both knees, type 2 diabetes, right shoulder limited ROM. No floor work. No spinal flexion. Supported positions only. Some sessions may omit conditioning.",
+    "no_floor": true,
+    "supported_only": true,
+    "no_spinal_flexion": true,
+    "hard_bans": ["plank", "side plank", "sit up", "crunch", "russian twist", "burpees", "jump"],
+    "ban_burpees": true
+  },
+  "Anj": {
+    "goal_override": "Toning. Prioritise abs-focused finishers (does not like cardio).",
+    "omit_conditioning": true,
+    "force_core_finisher": true,
+    "force_no_cardio": true,
+    "extra_abs": true
+  },
+  "Gizem": {
+    "goal_override": "Toning. Loves ab challenges. Always include an extra challenging ab finisher.",
+    "extra_abs": true,
+    "force_abs_challenge": true
+  },
+  "Kirsty": {
+    "ban_bike": true,
+    "ban_burpees": true
+  },
+  "Anne": {
+    "ban_bike": true,
+    "ban_burpees": true
+  }
+}
