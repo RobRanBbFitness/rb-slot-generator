@@ -1,9 +1,21 @@
 ﻿__pycache__/
 *.pyc
 .env
+
+# Secrets
 service_account.json
 API Keys.txt
+rb_slot_config.json
+
+# Generated files
 generated_slots/
+cache/
+bookings_stub.json
+client_overrides.json
 workouts_log.json
-rehab_day_map.json
+
+# Data / exports
 *.xlsx
+
+# Python env
+.venv/

@@ -1,11 +1,12 @@
-import os
 import re
 import subprocess
+import time
 from pathlib import Path
 from datetime import datetime
+
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, JSONResponse
-from fastapi.responses import FileResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, JSONResponse, FileResponse
+
 
 APP_TITLE = "R&B Slot Generator"
 BASE_DIR = Path(__file__).resolve().parent
@@ -13,11 +14,10 @@ GENERATED_DIR = BASE_DIR / "generated_slots"
 
 app = FastAPI(title=APP_TITLE)
 
-# -----------------------------
-# Helpers
-# -----------------------------
-
 SAFE_FILENAME_RE = re.compile(r"^[A-Za-z0-9_.\-]+\.txt$")
+
+_LAST_RUN_TS = 0.0
+COOLDOWN_SECONDS = 45
 
 
 def _ensure_generated_dir() -> None:
@@ -51,22 +51,35 @@ def _safe_file_path(filename: str) -> Path:
     return p
 
 
-def _run_generator_capture_output() -> str:
+def _run_v3_capture_output(window_hours: int = 48) -> str:
     """
-    Runs your existing generator endpoint behaviour by calling rb_generate_day.py.
-    This matches what you've already been running successfully.
+    Runs slot_generator_v3.py which should:
+      - read Sheets ONCE (with backoff)
+      - write bookings_stub.json + client_overrides.json locally
+      - run slot_generator_v2 in stub mode (no more Sheets reads)
     """
-    script = BASE_DIR / "rb_generate_day.py"
-    if not script.exists():
-        raise HTTPException(
-            status_code=500,
-            detail="rb_generate_day.py not found in the RBSLOT folder.",
-        )
+    global _LAST_RUN_TS
 
-    # Run: python rb_generate_day.py
-    # Capture output to show in the dashboard.
+    now = time.time()
+    if now - _LAST_RUN_TS < COOLDOWN_SECONDS:
+        remaining = int(COOLDOWN_SECONDS - (now - _LAST_RUN_TS))
+        raise HTTPException(status_code=429, detail=f"Cooldown active. Please wait {remaining}s then try again.")
+
+    script = BASE_DIR / "slot_generator_v3.py"
+    if not script.exists():
+        raise HTTPException(status_code=500, detail="slot_generator_v3.py not found in the RBSLOT folder.")
+
+    cmd = [
+        "python",
+        str(script),
+        "--window-hours",
+        str(window_hours),
+        "--cache-minutes",
+        "2",
+    ]
+
     proc = subprocess.run(
-        ["python", str(script)],
+        cmd,
         cwd=str(BASE_DIR),
         capture_output=True,
         text=True,
@@ -80,14 +93,16 @@ def _run_generator_capture_output() -> str:
         output += "\n\n--- STDERR ---\n" + proc.stderr
 
     if proc.returncode != 0:
+        if "[429]" in output or "Quota exceeded" in output:
+            raise HTTPException(
+                status_code=429,
+                detail="Google Sheets quota hit (429). Wait 2–3 minutes and click once.\n\n" + output,
+            )
         raise HTTPException(status_code=500, detail=output or "Generator failed with unknown error.")
 
+    _LAST_RUN_TS = time.time()
     return output or "SUCCESS: Generator ran, but no output was captured."
 
-
-# -----------------------------
-# Core routes
-# -----------------------------
 
 @app.get("/", include_in_schema=False)
 def home_redirect():
@@ -99,15 +114,17 @@ def health():
     return {"status": "ok", "app": APP_TITLE}
 
 
-@app.post("/generate-today", response_class=PlainTextResponse)
-def generate_today():
-    # Keeps your existing API working, but now it's also used by the dashboard button
-    return _run_generator_capture_output()
+@app.post("/generate-48h", response_class=PlainTextResponse)
+def generate_48h():
+    return _run_v3_capture_output(window_hours=48)
 
 
-# -----------------------------
-# Dashboard + file browser
-# -----------------------------
+@app.post("/generate-window/{hours}", response_class=PlainTextResponse)
+def generate_window(hours: int):
+    if hours < 1 or hours > 168:
+        raise HTTPException(status_code=400, detail="Hours must be between 1 and 168.")
+    return _run_v3_capture_output(window_hours=hours)
+
 
 @app.get("/dashboard", response_class=HTMLResponse, include_in_schema=False)
 def dashboard():
@@ -128,7 +145,7 @@ def dashboard():
             </tr>
             """
     else:
-        rows = """<tr><td colspan="4" style="opacity:.8;">No files yet. Press “Generate Today”.</td></tr>"""
+        rows = """<tr><td colspan="4" style="opacity:.8;">No files yet. Press “Generate Next 48 Hours”.</td></tr>"""
 
     html = f"""
 <!doctype html>
@@ -172,7 +189,7 @@ def dashboard():
       align-items: center;
     }}
     .btn {{
-      background: #e10600; /* R&B red */
+      background: #e10600;
       color: white;
       border: none;
       padding: 10px 14px;
@@ -241,10 +258,10 @@ def dashboard():
   <div class="wrap">
     <div class="card">
       <h1>R&B Fitness — Slot Generator Dashboard</h1>
-      <div class="sub">One-click generation + latest files. Keep the server running in PowerShell.</div>
+      <div class="sub">One-click generation + latest files. Generates the next 48 hours via v3 (cached + backoff).</div>
 
       <div class="row">
-        <button class="btn" id="runBtn" onclick="runGenerator()">Generate Today</button>
+        <button class="btn" id="runBtn" onclick="runGenerator()">Generate Next 48 Hours</button>
         <a class="btn secondary" href="/docs" target="_blank">Open API Docs</a>
         <span class="pill" id="statusPill">Status: Ready</span>
       </div>
@@ -273,8 +290,8 @@ def dashboard():
 
     <div class="card">
       <b>Run Log</b>
-      <div class="sub">This shows the generator output (auto-fix + validator results).</div>
-      <div id="log" class="mono">Press “Generate Today” to run the system…</div>
+      <div class="sub">This shows the generator output.</div>
+      <div id="log" class="mono">Press “Generate Next 48 Hours” to run the system…</div>
     </div>
   </div>
 
@@ -286,10 +303,10 @@ def dashboard():
 
       btn.disabled = true;
       pill.textContent = "Status: Running…";
-      log.textContent = "Running generator…\\n\\n";
+      log.textContent = "Running generator (48 hours)…\\n\\n";
 
       try {{
-        const res = await fetch("/generate-today", {{
+        const res = await fetch("/generate-48h", {{
           method: "POST",
           headers: {{
             "accept": "text/plain"
@@ -304,7 +321,6 @@ def dashboard():
         }} else {{
           pill.textContent = "Status: Complete ✅";
           log.textContent += text;
-          // refresh the list so new files show
           setTimeout(() => location.reload(), 800);
         }}
       }} catch (e) {{
