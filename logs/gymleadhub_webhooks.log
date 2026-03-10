@@ -1,0 +1,56 @@
+[05/03/2026 16:28:18] PAYLOAD:
+{
+  "clients": [
+    {
+      "focus": "Shoulders, Cardio & Abs",
+      "name": "Kate"
+    },
+    {
+      "focus": "Shoulders, Cardio & Abs",
+      "name": "Russel"
+    }
+  ],
+  "start_time": "2026-03-06T18:30:00"
+}
+[05/03/2026 16:28:24] PAYLOAD:
+{
+  "clients": [
+    {
+      "focus": "Shoulders, Cardio & Abs",
+      "name": "Kate"
+    },
+    {
+      "focus": "Shoulders, Cardio & Abs",
+      "name": "Russel"
+    }
+  ],
+  "start_time": "2026-03-06T18:30:00"
+}
+[05/03/2026 17:32:15] PAYLOAD:
+{
+  "clients": [
+    {
+      "focus": "Shoulders, Cardio & Abs",
+      "name": "Kate"
+    },
+    {
+      "focus": "Shoulders, Cardio & Abs",
+      "name": "Russel"
+    }
+  ],
+  "start_time": "2026-03-06T18:30:00"
+}
+[05/03/2026 18:28:17] PAYLOAD:
+{
+  "clients": [
+    {
+      "focus": "Shoulders, Cardio & Abs",
+      "name": "Kate"
+    },
+    {
+      "focus": "Shoulders, Cardio & Abs",
+      "name": "Russel"
+    }
+  ],
+  "start_time": "2026-03-06T18:30:00"
+}

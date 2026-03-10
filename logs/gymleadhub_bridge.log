@@ -1,0 +1,20 @@
+[05/03/2026 16:28:20] Ran: python C:\Users\Randb\OneDrive\Desktop\RBSLOT\slot_generator_v2.py --auto --source stub --window-hours 72
+STDOUT:
+ERROR: bookings_stub.json has no sessions.
+[05/03/2026 16:28:26] Ran: python C:\Users\Randb\OneDrive\Desktop\RBSLOT\slot_generator_v2.py --auto --source stub --window-hours 72
+STDOUT:
+ERROR: bookings_stub.json has no sessions.
+[05/03/2026 17:32:15] Wrote bookings_stub.json with 1 session(s).
+[05/03/2026 17:32:15] Running: python C:\Users\Randb\OneDrive\Desktop\RBSLOT\slot_generator_v2.py --auto --source stub --window-hours 72
+[05/03/2026 17:33:29] Return code: 0
+STDOUT (tail):
+Generated: generated_slots\2026-03-06_1830.txt
+STDERR (tail):
+<empty>
+[05/03/2026 18:28:17] Wrote bookings_stub.json with 1 session(s).
+[05/03/2026 18:28:17] Running: python C:\Users\Randb\OneDrive\Desktop\RBSLOT\slot_generator_v2.py --auto --source stub --window-hours 72
+[05/03/2026 18:29:30] Return code: 0
+STDOUT (tail):
+Generated: generated_slots\2026-03-06_1830.txt
+STDERR (tail):
+<empty>
